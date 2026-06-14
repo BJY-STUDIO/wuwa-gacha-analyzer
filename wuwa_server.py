@@ -1,0 +1,2231 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+鸣潮抽卡分析 — 本地Web服务
+===========================
+启动后浏览器访问 http://localhost:8766
+
+功能：
+  1. 上传抽卡记录JSON → 自动分析展示
+  2. 合并历史记录 → 数据更新后自动刷新页面
+  3. 图标本地缓存（并行下载）
+  4. Fluent 2 主题（深/浅色切换，默认跟随系统）
+
+用法:
+  python wuwa_server.py              # 默认端口8766
+  python wuwa_server.py --port 9000  # 指定端口
+"""
+
+import json, os, sys, datetime, urllib.request, argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from flask import Flask, request, jsonify, send_from_directory, render_template_string
+
+# ============================================================
+# 配置
+# ============================================================
+DATA_DIR = os.path.dirname(os.path.abspath(__file__))
+ICONS_CHAR_DIR = os.path.join(DATA_DIR, "icons", "characters")
+ICONS_WEAPON_DIR = os.path.join(DATA_DIR, "icons", "weapons")
+CDN_CHAR_BASE = "https://files.wuthery.com/p/GameData/IDFiedResources/Common/Image/IconRoleHead256"
+CDN_WEAPON_BASE = "https://files.wuthery.com/p/GameData/IDFiedResources/Common/Image/IconWeapon160"
+ENCORE_CHAR_API = "https://api-v2.encore.moe/api/en/character"
+ENCORE_WEAPON_API = "https://api-v2.encore.moe/api/en/weapon"
+ENCORE_MAPPING_FILE = os.path.join(DATA_DIR, "icons", "encore_mapping.json")
+
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# 内存中当前活跃数据
+current_data = None
+current_icon_map = {}
+
+# encore.moe 备用图标映射: {resourceId: "https://..."}
+_encore_icon_map = {}
+
+# ============================================================
+# encore.moe 备用图标源
+# ============================================================
+def _fetch_encore_mapping():
+    """从 encore.moe API 获取 resourceId→图标URL 映射，缓存到本地JSON"""
+    # 检查缓存是否可用（7天内）
+    if os.path.exists(ENCORE_MAPPING_FILE):
+        try:
+            mtime = os.path.getmtime(ENCORE_MAPPING_FILE)
+            age_days = (datetime.datetime.now().timestamp() - mtime) / 86400
+            if age_days < 7:
+                with open(ENCORE_MAPPING_FILE, "r", encoding="utf-8") as f:
+                    mapping = json.load(f)
+                print(f"  encore.moe映射: 从缓存加载 {len(mapping)} 条 ({age_days:.1f}天前)")
+                return mapping
+        except Exception:
+            pass
+
+    mapping = {}
+    try:
+        # 角色
+        print("  正在获取 encore.moe 角色映射...")
+        req = urllib.request.Request(ENCORE_CHAR_API, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            char_data = json.loads(resp.read().decode("utf-8"))
+        for char in char_data.get("roleList", []):
+            rid = str(char.get("Id", ""))
+            icon = char.get("RoleHeadIcon", "")
+            if rid and icon:
+                mapping[rid] = icon
+        print(f"  角色: {len([k for k in mapping])} 个")
+
+        # 武器
+        print("  正在获取 encore.moe 武器映射...")
+        req = urllib.request.Request(ENCORE_WEAPON_API, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            weapon_data = json.loads(resp.read().decode("utf-8"))
+        for wp in weapon_data.get("weapons", []):
+            rid = str(wp.get("Id", ""))
+            icon = wp.get("Icon", "")
+            if rid and icon:
+                mapping[rid] = icon
+        print(f"  武器: 合计 {len(mapping)} 个映射")
+
+        # 缓存到文件
+        os.makedirs(os.path.dirname(ENCORE_MAPPING_FILE), exist_ok=True)
+        with open(ENCORE_MAPPING_FILE, "w", encoding="utf-8") as f:
+            json.dump(mapping, f, ensure_ascii=False)
+        print(f"  映射已缓存到 {ENCORE_MAPPING_FILE}")
+    except Exception as e:
+        print(f"  ⚠ encore.moe映射获取失败: {e}")
+        # 获取失败时尝试用旧缓存
+        if os.path.exists(ENCORE_MAPPING_FILE):
+            try:
+                with open(ENCORE_MAPPING_FILE, "r", encoding="utf-8") as f:
+                    mapping = json.load(f)
+                print(f"  使用旧缓存: {len(mapping)} 条")
+            except Exception:
+                pass
+
+    return mapping
+
+def load_encore_mapping():
+    """加载 encore.moe 映射到内存"""
+    global _encore_icon_map
+    _encore_icon_map = _fetch_encore_mapping()
+    print(f"  encore.moe 备用源就绪: {len(_encore_icon_map)} 个映射")
+
+# ============================================================
+# 图标缓存（并行下载 + CDN→encore.moe 回退）
+# ============================================================
+def ensure_icon_dirs():
+    os.makedirs(ICONS_CHAR_DIR, exist_ok=True)
+    os.makedirs(ICONS_WEAPON_DIR, exist_ok=True)
+
+def download_icon(resource_id, resource_type):
+    if not resource_id:
+        return (resource_id, "")
+    rid = str(resource_id)
+    is_char = resource_type == "\u89d2\u8272"
+    local_dir = ICONS_CHAR_DIR if is_char else ICONS_WEAPON_DIR
+
+    # 1) 检查本地已有的缓存（png 或 webp）
+    for ext in (".png", ".webp"):
+        local_path = os.path.join(local_dir, f"{rid}{ext}")
+        if os.path.exists(local_path):
+            return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
+
+    # 2) 角色图标：CDN 主源 → encore.moe 备用
+    #    武器图标：encore.moe 优先（高分辨率 webp）→ CDN IconWeapon80 兜底（低分辨率 png）
+    if is_char:
+        # 角色：CDN 优先
+        cdn_url = f"{CDN_CHAR_BASE}/{rid}.png"
+        try:
+            req = urllib.request.Request(cdn_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status == 200:
+                    local_path = os.path.join(local_dir, f"{rid}.png")
+                    with open(local_path, "wb") as f:
+                        f.write(resp.read())
+                    return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
+        except Exception:
+            pass
+        # CDN 失败 → encore.moe
+        encore_url = _encore_icon_map.get(rid)
+        if encore_url:
+            try:
+                req = urllib.request.Request(encore_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status == 200:
+                        local_path = os.path.join(local_dir, f"{rid}.webp")
+                        with open(local_path, "wb") as f:
+                            f.write(resp.read())
+                        return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
+            except Exception:
+                pass
+    else:
+        # 武器：CDN IconWeapon160 优先（高分辨率 png）→ encore.moe 兜底（webp）
+        cdn_url = f"{CDN_WEAPON_BASE}/{rid}.png"
+        try:
+            req = urllib.request.Request(cdn_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = resp.read()
+                # CDN 可能返回 HTML 404 页面，需验证是真实 PNG
+                if resp.status == 200 and data[:4] == b'\x89PNG':
+                    local_path = os.path.join(local_dir, f"{rid}.png")
+                    with open(local_path, "wb") as f:
+                        f.write(data)
+                    return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
+        except Exception:
+            pass
+        # CDN 失败或返回非图片 → encore.moe 兜底
+        encore_url = _encore_icon_map.get(rid)
+        if encore_url:
+            try:
+                req = urllib.request.Request(encore_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status == 200:
+                        local_path = os.path.join(local_dir, f"{rid}.webp")
+                        with open(local_path, "wb") as f:
+                            f.write(resp.read())
+                        return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
+            except Exception:
+                pass
+
+    return (resource_id, "")
+
+def cache_icons(data):
+    """从数据中提取全部图标，并行下载缓存"""
+    ensure_icon_dirs()
+    items = set()
+    for key, records in data.items():
+        if not isinstance(records, list):
+            continue
+        for r in records:
+            if r.get("resourceId"):
+                items.add((r["resourceId"], r.get("resourceType", "")))
+
+    print(f"  图标缓存: {len(items)}个, 并行下载中...")
+    icon_map = {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(download_icon, rid, rtype): rid for rid, rtype in items}
+        for future in as_completed(futures):
+            rid, local_path = future.result()
+            if local_path:
+                icon_map[rid] = local_path
+    print(f"  图标缓存完成: {len(icon_map)}/{len(items)}个")
+    return icon_map
+
+# ============================================================
+# 数据合并（复用 wuwa_gacha.py 的逻辑）
+# ============================================================
+POOL_TYPE_NAMES = {
+    1: "角色活动唤取", 2: "武器活动唤取", 3: "角色常驻唤取",
+    4: "武器常驻唤取", 5: "新手唤取", 6: "新手自选唤取",
+    7: "感恩定向唤取", 8: "角色新旅唤取", 9: "武器新旅唤取",
+    10: "角色联动唤取", 11: "武器联动唤取",
+}
+
+POOL_NAME_TO_TYPE = {
+    "角色活动唤取": 1, "武器活动唤取": 2,
+    "角色常驻唤取": 3, "武器常驻唤取": 4,
+    "新手唤取": 5, "新手自选唤取": 6,
+    "感恩定向唤取": 7, "角色新旅唤取": 8,
+    "武器新旅唤取": 9, "角色联动唤取": 10,
+    "武器联动唤取": 11,
+    "角色精准调谐": 1, "武器精准调谐": 2,
+    "角色调谐（常驻池）": 3, "武器调谐（常驻池）": 4,
+    "新手调谐": 5, "自选调谐": 6, "常驻调谐": 7,
+}
+
+def normalize_pool_key(pool_key, records=None):
+    if pool_key.isdigit():
+        return pool_key
+    if pool_key in POOL_NAME_TO_TYPE:
+        return str(POOL_NAME_TO_TYPE[pool_key])
+    if records:
+        for r in records[:3]:
+            cpt = r.get("cardPoolType", "")
+            if isinstance(cpt, str) and cpt in POOL_NAME_TO_TYPE:
+                return str(POOL_NAME_TO_TYPE[cpt])
+    return pool_key
+
+def _record_key(r):
+    return (r.get("time"), r.get("resourceId"), r.get("name"), r.get("qualityLevel"))
+
+def _stable_sort_desc(records):
+    """稳定排序：确保时间严格倒序，同时间戳保持原有顺序"""
+    indexed = [(i, r) for i, r in enumerate(records)]
+    indexed.sort(key=lambda x: (-_time_to_int(x[1].get("time", "")), x[0]))
+    return [r for _, r in indexed]
+
+def _time_to_int(t):
+    """将时间字符串转为可比较的整数 (YYYYMMDDHHmmss)"""
+    try:
+        return int(t.replace("-", "").replace(":", "").replace(" ", ""))
+    except (ValueError, AttributeError):
+        return 0
+
+def _merge_pool(pool_id, old_records, new_records):
+    if not new_records:
+        # 旧数据原样保留，但确保时间倒序
+        return _stable_sort_desc(old_records)
+    if not old_records:
+        return _stable_sort_desc(new_records)
+
+    new_key_set = set(_record_key(r) for r in new_records)
+    oldest_new_time = new_records[-1].get("time", "")
+
+    cut_index = -1
+    for i in range(len(old_records) - 1, -1, -1):
+        r = old_records[i]
+        r_time = r.get("time", "")
+        if r_time < oldest_new_time:
+            # 时间比new最旧还早，继续往新端找
+            # 但其实比new最旧还早的记录肯定不在new里，跳过
+            # 我们需要找old中存在于new的最旧一条
+            # 所以应该 continue 而不是 break
+            continue
+        if _record_key(r) in new_key_set:
+            cut_index = i
+            break
+
+    if cut_index == -1:
+        # 无重叠 → 直接拼接后排序
+        return _stable_sort_desc(new_records + old_records)
+
+    pure_old = old_records[cut_index + 1:]
+    overlap_zone = old_records[:cut_index + 1]
+    matched = sum(1 for r in overlap_zone if _record_key(r) in new_key_set)
+    overlap_rate = matched / len(overlap_zone) if overlap_zone else 1.0
+
+    if overlap_rate < 0.3:
+        # 降级为逐条合并
+        merged = list(new_records)
+        new_keys = set(_record_key(r) for r in new_records)
+        for r in old_records:
+            if _record_key(r) not in new_keys:
+                merged.append(r)
+        return _stable_sort_desc(merged)
+
+    return _stable_sort_desc(new_records + pure_old)
+
+def merge_data(new_data, existing_data):
+    """合并新旧抽卡数据（截断+接续）"""
+    uid = new_data.get("uid") or existing_data.get("uid", "")
+    merged = {"uid": uid}
+
+    all_pool_keys = set()
+    for src in [existing_data, new_data]:
+        for k, v in src.items():
+            if k == "uid" or not isinstance(v, list):
+                continue
+            norm_key = normalize_pool_key(k, v)
+            all_pool_keys.add(norm_key)
+
+    for pool_key in sorted(all_pool_keys, key=lambda x: int(x) if x.isdigit() else 99):
+        old_records = []
+        for k, v in existing_data.items():
+            if k == "uid" or not isinstance(v, list):
+                continue
+            if normalize_pool_key(k, v) == pool_key:
+                old_records.extend(v)
+
+        new_records = []
+        for k, v in new_data.items():
+            if k == "uid" or not isinstance(v, list):
+                continue
+            if normalize_pool_key(k, v) == pool_key:
+                new_records.extend(v)
+
+        merged_records = _merge_pool(pool_key, old_records, new_records)
+        merged[pool_key] = merged_records
+
+    return merged
+
+def count_records(data):
+    """统计数据总条数"""
+    return sum(len(v) for k, v in data.items() if isinstance(v, list))
+
+# ============================================================
+# HTML 模板
+# ============================================================
+
+UPLOAD_PAGE = """<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>鸣潮抽卡分析</title>
+<style>
+/* =============================================
+   Fluent 2 Design Token System — Upload Page
+   ============================================= */
+:root, [data-theme="light"] {
+  --colorNeutralBackground1: #ffffff;
+  --colorNeutralBackground2: #fafafa;
+  --colorNeutralBackground3: #f5f5f5;
+  --colorNeutralBackground4: #f0f0f0;
+  --colorSubtleBackground: #fafafa;
+  --colorSubtleBackgroundHover: #f0f0f0;
+  --colorNeutralForeground1: #141414;
+  --colorNeutralForeground2: #616161;
+  --colorNeutralForeground3: #9e9e9e;
+  --colorNeutralStroke1: #d1d1d1;
+  --colorNeutralStroke2: #e0e0e0;
+  --colorNeutralStrokeAccessible: #616161;
+  --colorNeutralStrokeAccessibleHover: #575757;
+  --colorNeutralStrokeAccessiblePressed: #4d4d4d;
+  --colorBrandBackground: #0078d4;
+  --colorBrandBackgroundHover: #106ebe;
+  --colorBrandBackgroundPressed: #005a9e;
+  --colorBrandBackground2: #deecf9;
+  --colorBrandForeground1: #0078d4;
+  --colorCompoundBrandBackground: #0f6cbd;
+  --colorCompoundBrandBackgroundHover: #115ea3;
+  --colorCompoundBrandBackgroundPressed: #0f548c;
+  --colorCompoundBrandStroke: #0078d4;
+  --colorCompoundBrandForeground: #0078d4;
+  --colorNeutralForegroundInverted: #ffffff;
+  --shadow4: 0 2px 4px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.08);
+  --colorGreenText: #0b6a0b;
+  --colorRedText: #a4262c;
+}
+[data-theme="dark"] {
+  --colorNeutralBackground1: #292929;
+  --colorNeutralBackground2: #1f1f1f;
+  --colorNeutralBackground3: #1a1a1a;
+  --colorNeutralBackground4: #161616;
+  --colorSubtleBackground: #1f1f1f;
+  --colorSubtleBackgroundHover: #292929;
+  --colorNeutralForeground1: #f8f8f8;
+  --colorNeutralForeground2: #c4c4c4;
+  --colorNeutralForeground3: #8a8a8a;
+  --colorNeutralStroke1: #4a4a4a;
+  --colorNeutralStroke2: #3d3d3d;
+  --colorNeutralStrokeAccessible: #adadad;
+  --colorNeutralStrokeAccessibleHover: #bdbdbd;
+  --colorNeutralStrokeAccessiblePressed: #b3b3b3;
+  --colorBrandBackground: #0078d4;
+  --colorBrandBackgroundHover: #106ebe;
+  --colorBrandBackgroundPressed: #005a9e;
+  --colorBrandBackground2: #083147;
+  --colorBrandForeground1: #62abf5;
+  --colorCompoundBrandBackground: #479ef5;
+  --colorCompoundBrandBackgroundHover: #62abf5;
+  --colorCompoundBrandBackgroundPressed: #2886de;
+  --colorCompoundBrandStroke: #62abf5;
+  --colorCompoundBrandForeground: #62abf5;
+  --colorNeutralForegroundInverted: #242424;
+  --shadow4: 0 2px 4px rgba(0,0,0,0.22), 0 4px 12px rgba(0,0,0,0.24);
+  --colorGreenText: #6ccb5f;
+  --colorRedText: #f1707b;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  background: var(--colorNeutralBackground3);
+  color: var(--colorNeutralForeground1);
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.3s ease;
+}
+
+/* --- Theme Switch --- */
+.theme-switch {
+  position: fixed; top: 20px; right: 24px;
+  display: flex; align-items: center; gap: 8px;
+  color: var(--colorNeutralForeground2); font-size: 16px; line-height: 1;
+  z-index: 10;
+}
+.theme-icon { transition: opacity 0.2s ease; display: flex; align-items: center; }
+.theme-toggle {
+  position: relative; width: 40px; height: 20px;
+  background: transparent;
+  border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--colorNeutralStrokeAccessible);
+  transition: all 0.2s ease; flex-shrink: 0; outline: none;
+}
+.theme-toggle::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px;
+  background: var(--colorNeutralStrokeAccessible);
+  border-radius: 50%; transition: all 0.2s ease;
+}
+.theme-toggle:focus-visible { box-shadow: 0 0 0 2px var(--colorCompoundBrandStroke); }
+.theme-toggle:hover { border-color: var(--colorNeutralStrokeAccessibleHover); }
+.theme-toggle:hover::after { background: var(--colorNeutralStrokeAccessibleHover); }
+.theme-toggle:active { border-color: var(--colorNeutralStrokeAccessiblePressed); }
+.theme-toggle:active::after { background: var(--colorNeutralStrokeAccessiblePressed); }
+.theme-toggle.active {
+  background: var(--colorCompoundBrandBackground);
+  border-color: transparent;
+}
+.theme-toggle.active::after { left: 22px; background: var(--colorNeutralForegroundInverted); }
+.theme-toggle.active:hover {
+  background: var(--colorCompoundBrandBackgroundHover);
+}
+.theme-toggle.active:active {
+  background: var(--colorCompoundBrandBackgroundPressed);
+}
+
+/* --- Hero Section --- */
+.hero { text-align: center; margin-bottom: 32px; }
+.hero-icon {
+  width: 64px; height: 64px; margin: 0 auto 16px;
+  background: var(--colorNeutralBackground4);
+  border-radius: 16px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--colorBrandForeground1);
+  transition: background 0.3s;
+}
+.hero h1 {
+  font-size: 28px; font-weight: 700;
+  color: var(--colorNeutralForeground1);
+  margin-bottom: 8px; letter-spacing: -0.02em;
+}
+.hero .desc {
+  font-size: 14px; color: var(--colorNeutralForeground2);
+  line-height: 1.6; max-width: 360px; margin: 0 auto;
+}
+
+/* --- Upload Card --- */
+.upload-card {
+  background: var(--colorNeutralBackground1);
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 12px;
+  padding: 40px 48px;
+  box-shadow: var(--shadow4);
+  max-width: 480px; width: 90%;
+  transition: background 0.3s, border-color 0.3s, box-shadow 0.3s;
+}
+
+/* --- Upload Zone (Fluent Drop Zone) --- */
+.upload-zone {
+  border: 2px dashed var(--colorNeutralStroke2);
+  border-radius: 8px;
+  padding: 36px 20px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+  background: var(--colorSubtleBackground);
+}
+.upload-zone:hover {
+  border-color: var(--colorCompoundBrandStroke);
+  background: var(--colorSubtleBackgroundHover);
+}
+.upload-zone.dragover {
+  border-color: var(--colorBrandForeground1);
+  background: var(--colorSubtleBackgroundHover);
+  border-style: solid;
+}
+.upload-zone .zone-icon {
+  margin-bottom: 12px;
+  color: var(--colorNeutralForeground3);
+  display: flex; justify-content: center;
+  transition: color 0.2s;
+}
+.upload-zone:hover .zone-icon { color: var(--colorBrandForeground1); }
+.upload-zone .zone-text {
+  font-size: 14px; color: var(--colorNeutralForeground2); line-height: 1.5;
+}
+.upload-zone .zone-text strong {
+  color: var(--colorBrandForeground1); font-weight: 600;
+}
+.upload-zone .zone-hint {
+  font-size: 12px; color: var(--colorNeutralForeground3); margin-top: 8px;
+}
+.upload-zone input[type="file"] {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  opacity: 0; cursor: pointer;
+}
+
+/* --- Toast --- */
+.toast-container { position: fixed; bottom: 16px; right: 20px; width: 292px; pointer-events: none; z-index: 9999; }
+.toast {
+  pointer-events: all; display: grid; grid-template-columns: auto 1fr auto;
+  padding: 12px; border-radius: 4px; border: 1px solid transparent;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.14), 0 0 2px rgba(0,0,0,0.12);
+  background: var(--colorNeutralBackground1); color: var(--colorNeutralForeground1);
+  font-size: 14px; line-height: 20px; margin-top: 16px;
+  animation: toast-in 0.25s cubic-bezier(0.4,0,0.2,1) forwards;
+}
+[data-theme="dark"] .toast { background: #292929; color: #e0e0e0; }
+.toast__media { display: flex; padding-top: 2px; padding-right: 8px; font-size: 16px; align-items: flex-start; }
+.toast__content { grid-column: 2 / 3; min-width: 0; }
+.toast__title { font-weight: 600; word-break: break-word; }
+.toast__body { padding-top: 4px; font-weight: 400; font-size: 14px; color: var(--colorNeutralForeground2); word-break: break-word; }
+[data-theme="dark"] .toast__body { color: #c4c4c4; }
+.toast__close {
+  grid-column: 3; display: flex; align-items: flex-start; padding-left: 12px;
+  background: none; border: none; cursor: pointer; color: var(--colorNeutralForeground3);
+  padding: 0; font-size: 16px; line-height: 1;
+}
+.toast__close:hover { color: var(--colorNeutralForeground1); }
+.toast--success .toast__media { color: #0f7b0f; }
+[data-theme="dark"] .toast--success .toast__media { color: #9edcab; }
+.toast--error .toast__media { color: #d13438; }
+[data-theme="dark"] .toast--error .toast__media { color: #f5a5ae; }
+.toast--warning .toast__media { color: #9d5d00; }
+[data-theme="dark"] .toast--warning .toast__media { color: #f7c67f; }
+.toast--info .toast__media { color: #616161; }
+[data-theme="dark"] .toast--info .toast__media { color: #e0e0e0; }
+.toast--exit { animation: toast-out 0.2s cubic-bezier(0.4,0,0.2,1) forwards; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes toast-out { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(-4px); } }
+</style>
+</head>
+<body>
+
+<div class="theme-switch">
+  <span class="theme-icon"><svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2c.28 0 .5.22.5.5v1a.5.5 0 0 1-1 0v-1c0-.28.22-.5.5-.5Zm0 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0-1a3 3 0 1 1 0-6 3 3 0 0 1 0 6Zm7.5-2.5a.5.5 0 0 0 0-1h-1a.5.5 0 0 0 0 1h1ZM10 16c.28 0 .5.22.5.5v1a.5.5 0 0 1-1 0v-1c0-.28.22-.5.5-.5Zm-6.5-5.5a.5.5 0 0 0 0-1H2.46a.5.5 0 0 0 0 1H3.5Zm.65-6.35c.2-.2.5-.2.7 0l1 1a.5.5 0 1 1-.7.7l-1-1a.5.5 0 0 1 0-.7Zm.7 11.7a.5.5 0 0 1-.7-.7l1-1a.5.5 0 0 1 .7.7l-1 1Zm11-11.7a.5.5 0 0 0-.7 0l-1 1a.5.5 0 0 0 .7.7l1-1a.5.5 0 0 0 0-.7Zm-.7 11.7a.5.5 0 0 0 .7-.7l-1-1a.5.5 0 0 0-.7.7l1 1Z"/></svg></span>
+  <div class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" role="switch" tabindex="0" aria-label="切换深浅主题"></div>
+  <span class="theme-icon"><svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M15.5 13.5A6.98 6.98 0 0 1 4 14.39c2.83-1.09 4.56-2.42 5.6-4.4 1.04-2 1.33-4.16.75-6.9A6.98 6.98 0 0 1 15.5 13.5ZM5.45 16.92A7.98 7.98 0 1 0 9.88 2.04a.6.6 0 0 0-.61.73c.69 2.82.43 4.88-.55 6.76-.94 1.78-2.55 3.03-5.55 4.1a.6.6 0 0 0-.3.9 7.95 7.95 0 0 0 2.59 2.39Z"/></svg></span>
+</div>
+
+<div class="upload-card">
+  <div class="hero">
+    <div class="hero-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M20 9.54V9.4A7.43 7.43 0 0 0 12.46 2a.48.48 0 0 0-.46.49V9.5c0 .28.22.5.5.5h7.02c.26 0 .48-.2.48-.46Zm-6.5-5.97c2.53.4 4.53 2.4 4.93 4.93H13.5V3.57ZM9 10.5V5.69a6 6 0 1 0 3.01 11.62c-.57.38-.97.98-1.11 1.68l-.4.01A7.5 7.5 0 0 1 10 4.02c.28-.02.5.2.5.48v6a1 1 0 0 0 1 1h6c.28 0 .5.22.48.5a7.47 7.47 0 0 1-.36 1.85h-.12c-.74 0-1.4.3-1.88.79.3-.5.54-1.06.7-1.64H11.5A2.5 2.5 0 0 1 9 10.5Zm11 3a1.5 1.5 0 0 1 3 0v8a1.5 1.5 0 0 1-3 0v-8ZM17.5 15c-.83 0-1.5.67-1.5 1.5v5a1.5 1.5 0 0 0 3 0v-5c0-.83-.67-1.5-1.5-1.5Zm-4 3c-.83 0-1.5.67-1.5 1.5v2a1.5 1.5 0 0 0 3 0v-2c0-.83-.67-1.5-1.5-1.5Z"/></svg></div>
+    <h1>鸣潮抽卡分析</h1>
+    <div class="desc">上传游戏内导出或 wuwa_gacha.py 抓取的抽卡记录 JSON 文件，即可查看分析报告</div>
+  </div>
+  <div class="upload-zone" id="upload-zone">
+    <div class="zone-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M3.5 6.25c0-.97.78-1.75 1.75-1.75h2.88c.2 0 .39.08.53.22l2.06 2.06c.14.14.33.22.53.22h5.5c.97 0 1.75.78 1.75 1.75 0 .09.01.17.04.25H8.72c-1.34 0-2.58.71-3.25 1.87L3.5 14.28V6.25ZM2 17.79A3.25 3.25 0 0 0 5.25 21h11.04c1.33 0 2.57-.72 3.24-1.88l3.03-5.25A3.25 3.25 0 0 0 19.96 9a.75.75 0 0 0 .04-.25c0-1.8-1.45-3.25-3.25-3.25h-5.19L9.72 3.66c-.42-.42-1-.66-1.6-.66H5.26A3.25 3.25 0 0 0 2 6.25V17.79Zm6.72-7.3h11.03a1.75 1.75 0 0 1 1.51 2.63l-3.03 5.25c-.4.7-1.14 1.13-1.95 1.13H5.25a1.75 1.75 0 0 1-1.51-2.63l3.03-5.25c.4-.7 1.14-1.12 1.95-1.12Z"/></svg></div>
+    <div class="zone-text">拖拽文件到此处，或 <strong>点击选择文件</strong></div>
+    <div class="zone-hint">支持 .json 格式</div>
+    <input type="file" id="file-input" accept=".json" onchange="handleFile(this.files[0])">
+  </div>
+</div>
+<div class="toast-container" id="toast-container"></div>
+
+<script>
+const storageKey = 'wuwa-theme';
+const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const toggle = document.getElementById('theme-toggle');
+  if (toggle) toggle.classList.toggle('active', theme === 'dark');
+}
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  localStorage.setItem(storageKey, next);
+  applyTheme(next);
+}
+
+const saved = localStorage.getItem(storageKey);
+applyTheme(saved || (mediaQuery.matches ? 'dark' : 'light'));
+mediaQuery.addEventListener('change', e => {
+  if (!localStorage.getItem(storageKey)) applyTheme(e.matches ? 'dark' : 'light');
+});
+
+// Drag & drop
+const zone = document.getElementById('upload-zone');
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+zone.addEventListener('drop', e => {
+  e.preventDefault(); zone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+
+const TOAST_ICONS = {
+  success: '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm3.36 6.65-3.75 4.5a.5.5 0 0 1-.72.04l-2.25-2a.5.5 0 1 1 .66-.76l1.87 1.66 3.42-4.1a.5.5 0 0 1 .77.66Z"/></svg>',
+  error: '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M3.86 3.15a.5.5 0 0 0-.71.7L9.29 10l-6.14 6.15a.5.5 0 0 0 .7.7L10 10.72l6.15 6.14a.5.5 0 0 0 .7-.71L10.72 10l6.14-6.15a.5.5 0 0 0-.7-.7L10 9.29 3.86 3.14Z"/></svg>',
+  warning: '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 11.5a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5ZM10 6a.5.5 0 0 1 .5.41V11.59a.5.5 0 0 1-1 0V6.41A.5.5 0 0 1 10 6Z"/></svg>',
+  info: '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm.5 5.5a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM10 9a.5.5 0 0 1 .5.41V14.59a.5.5 0 0 1-1 0V9.41A.5.5 0 0 1 10 9Z"/></svg>'
+};
+
+function showToast(intent, title, body, duration) {
+  const container = document.getElementById('toast-container');
+  const el = document.createElement('div');
+  el.className = 'toast toast--' + intent;
+  el.innerHTML = '<div class="toast__media">' + (TOAST_ICONS[intent] || TOAST_ICONS.info) + '</div>' +
+    '<div class="toast__content"><div class="toast__title">' + title + '</div>' +
+    (body ? '<div class="toast__body">' + body + '</div>' : '') + '</div>' +
+    '<button class="toast__close" onclick="dismissToast(this.parentElement)"><svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="m4.09 4.22.06-.07a.5.5 0 0 1 .63-.06l.07.06L10 9.29l5.15-5.14a.5.5 0 0 1 .63-.06l.07.06c.18.17.2.44.06.63l-.06.07L10.71 10l5.14 5.15c.18.17.2.44.06.63l-.06.07a.5.5 0 0 1-.63.06l-.07-.06L10 10.71l-5.15 5.14a.5.5 0 0 1-.63.06l-.07-.06a.5.5 0 0 1-.06-.63l.06-.07L9.29 10 4.15 4.85a.5.5 0 0 1-.06-.63l.06-.07-.06.07Z"/></svg></button>';
+  container.appendChild(el);
+  const timeout = duration !== undefined ? duration : 3000;
+  if (timeout > 0) setTimeout(() => dismissToast(el), timeout);
+}
+
+function dismissToast(el) {
+  if (!el || el.classList.contains('toast--exit')) return;
+  el.classList.add('toast--exit');
+  setTimeout(() => el.remove(), 200);
+}
+
+function handleFile(file) {
+  if (!file) return;
+  showToast('info', '正在上传', file.name);
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  fetch('/api/upload', { method: 'POST', body: formData })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        showToast('success', '上传成功', '正在跳转分析页...', 3000);
+        setTimeout(() => window.location.href = '/analysis', 800);
+      } else {
+        showToast('error', '上传失败', data.error || '未知错误');
+      }
+    })
+    .catch(err => {
+      showToast('error', '网络错误', err.message);
+    });
+}
+</script>
+</body>
+</html>"""
+
+# 分析页模板 — CSS/JS 逻辑与原 gacha_report.py 一致，但数据通过 fetch 获取
+ANALYSIS_PAGE = """<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>鸣潮抽卡分析</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fluentui/web-components@2/dist/web-components.min.css" onerror="this.remove()">
+<script type="module" src="https://cdn.jsdelivr.net/npm/@fluentui/web-components@2/dist/web-components.min.js"></script>
+<style>
+/* =============================================
+   Fluent 2 Design Token System
+   ============================================= */
+:root, [data-theme="light"] {
+  --colorNeutralBackground1: #ffffff;
+  --colorNeutralBackground1Hover: #f5f5f5;
+  --colorNeutralBackground1Pressed: #e0e0e0;
+  --colorNeutralBackground2: #fafafa;
+  --colorNeutralBackground2Hover: #f0f0f0;
+  --colorNeutralBackground3: #f5f5f5;
+  --colorNeutralBackground3Hover: #ebebeb;
+  --colorNeutralBackground4: #f0f0f0;
+  --colorNeutralBackground5: #ebebeb;
+  --colorNeutralBackground6: #e0e0e0;
+  --colorSubtleBackground: #fafafa;
+  --colorSubtleBackgroundHover: #f0f0f0;
+  --colorNeutralForeground1: #141414;
+  --colorNeutralForeground1Hover: #242424;
+  --colorNeutralForeground2: #616161;
+  --colorNeutralForeground2Hover: #717171;
+  --colorNeutralForeground3: #9e9e9e;
+  --colorNeutralForeground4: #b3b3b3;
+  --colorNeutralForegroundDisabled: #bdbdbd;
+  --colorNeutralStroke1: #d1d1d1;
+  --colorNeutralStroke1Hover: #c4c4c4;
+  --colorNeutralStroke2: #e0e0e0;
+  --colorNeutralStroke3: #ebebeb;
+  --colorNeutralStrokeAccessible: #616161;
+  --colorNeutralStrokeAccessibleHover: #575757;
+  --colorNeutralStrokeAccessiblePressed: #4d4d4d;
+  --colorCompoundBrandStroke: #0078d4;
+  --colorCompoundBrandForeground: #0078d4;
+  --colorCompoundBrandBackground: #0f6cbd;
+  --colorCompoundBrandBackgroundHover: #115ea3;
+  --colorCompoundBrandBackgroundPressed: #0f548c;
+  --colorNeutralForegroundInverted: #ffffff;
+  --colorBrandBackground: #0078d4;
+  --colorBrandBackgroundHover: #106ebe;
+  --colorBrandBackgroundPressed: #005a9e;
+  --colorBrandBackground2: #deecf9;
+  --colorBrandForeground1: #0078d4;
+  --colorBrandForeground2: #106ebe;
+  --shadow2: 0 1px 2px rgba(0,0,0,0.10), 0 2px 6px rgba(0,0,0,0.06);
+  --shadow4: 0 2px 4px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.08);
+  --shadow8: 0 4px 8px rgba(0,0,0,0.10), 0 8px 24px rgba(0,0,0,0.10);
+  --colorGold: #d4a017; --colorGoldSubtle: #fef6e0; --colorGoldText: #8a6914;
+  --colorPurple: #8764b8; --colorPurpleSubtle: #f3eaf9; --colorPurpleText: #6b3f9e;
+  --colorRed: #d13438; --colorRedSubtle: #fde7e9; --colorRedText: #a4262c;
+  --colorGreen: #107c10; --colorGreenSubtle: #dff6dd; --colorGreenText: #0b6a0b;
+  --colorCyan: #038387; --colorCyanSubtle: #d0f0f1; --colorCyanText: #036c6f;
+  --colorOrange: #ca5010; --colorOrangeSubtle: #fed9cc; --colorOrangeText: #9e4708;
+  --pityBarGold: linear-gradient(90deg, #c49011, #d4a017, #e5b82a);
+  --pityBarPurple: linear-gradient(90deg, #6b3f9e, #8764b8, #a278d0);
+  --pityBarRed: linear-gradient(90deg, #a4262c, #d13438, #e85050);
+}
+[data-theme="dark"] {
+  --colorNeutralBackground1: #292929;
+  --colorNeutralBackground1Hover: #333333;
+  --colorNeutralBackground1Pressed: #3d3d3d;
+  --colorNeutralBackground2: #1f1f1f;
+  --colorNeutralBackground2Hover: #292929;
+  --colorNeutralBackground3: #1a1a1a;
+  --colorNeutralBackground3Hover: #242424;
+  --colorNeutralBackground4: #161616;
+  --colorNeutralBackground5: #141414;
+  --colorNeutralBackground6: #101010;
+  --colorSubtleBackground: #1f1f1f;
+  --colorSubtleBackgroundHover: #333333;
+  --colorNeutralForeground1: #f8f8f8;
+  --colorNeutralForeground1Hover: #ffffff;
+  --colorNeutralForeground2: #c4c4c4;
+  --colorNeutralForeground2Hover: #d4d4d4;
+  --colorNeutralForeground3: #8a8a8a;
+  --colorNeutralForeground4: #737373;
+  --colorNeutralForegroundDisabled: #6d6d6d;
+  --colorNeutralStroke1: #4a4a4a;
+  --colorNeutralStroke1Hover: #5a5a5a;
+  --colorNeutralStroke2: #3d3d3d;
+  --colorNeutralStroke3: #333333;
+  --colorNeutralStrokeAccessible: #adadad;
+  --colorNeutralStrokeAccessibleHover: #bdbdbd;
+  --colorNeutralStrokeAccessiblePressed: #b3b3b3;
+  --colorCompoundBrandStroke: #62abf5;
+  --colorCompoundBrandForeground: #62abf5;
+  --colorCompoundBrandBackground: #479ef5;
+  --colorCompoundBrandBackgroundHover: #62abf5;
+  --colorCompoundBrandBackgroundPressed: #2886de;
+  --colorNeutralForegroundInverted: #242424;
+  --colorBrandBackground: #0078d4;
+  --colorBrandBackgroundHover: #106ebe;
+  --colorBrandBackgroundPressed: #005a9e;
+  --colorBrandBackground2: #083147;
+  --colorBrandForeground1: #62abf5;
+  --colorBrandForeground2: #74b5f7;
+  --shadow2: 0 1px 2px rgba(0,0,0,0.28), 0 2px 6px rgba(0,0,0,0.20);
+  --shadow4: 0 2px 4px rgba(0,0,0,0.22), 0 4px 12px rgba(0,0,0,0.24);
+  --shadow8: 0 4px 8px rgba(0,0,0,0.26), 0 8px 24px rgba(0,0,0,0.30);
+  --colorGold: #f0b429; --colorGoldSubtle: #3d3019; --colorGoldText: #f0b429;
+  --colorPurple: #b77dff; --colorPurpleSubtle: #2d1f4a; --colorPurpleText: #b77dff;
+  --colorRed: #ff6b6b; --colorRedSubtle: #3d1a1a; --colorRedText: #ff6b6b;
+  --colorGreen: #51cf66; --colorGreenSubtle: #1a3d20; --colorGreenText: #51cf66;
+  --colorCyan: #22b8cf; --colorCyanSubtle: #1a2e2e; --colorCyanText: #22b8cf;
+  --colorOrange: #ff922b; --colorOrangeSubtle: #2e2a1a; --colorOrangeText: #ff922b;
+  --pityBarGold: linear-gradient(90deg, #8b6914, #c49520, var(--colorGold));
+  --pityBarPurple: linear-gradient(90deg, #5f3d8f, #8b5dcf, var(--colorPurple));
+  --pityBarRed: linear-gradient(90deg, #8b2020, #d43d3d, #ff5555);
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  background: var(--colorNeutralBackground3);
+  color: var(--colorNeutralForeground1);
+  line-height: 1.5; min-height: 100vh;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+a { color: var(--colorBrandForeground1); text-decoration: none; }
+.container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+
+/* Header */
+.header {
+  background: var(--colorNeutralBackground1);
+  border-bottom: 1px solid var(--colorNeutralStroke2);
+  padding: 12px 0;
+  position: sticky; top: 0; z-index: 100;
+  backdrop-filter: blur(20px);
+  transition: background 0.3s ease;
+}
+.header-inner { display: flex; justify-content: space-between; align-items: center; }
+.header h1 { font-size: 22px; font-weight: 600; color: var(--colorBrandForeground1); }
+.header .meta { color: var(--colorNeutralForeground2); font-size: 13px; margin-top: 2px; }
+
+/* Theme switcher */
+.theme-switch { display: flex; align-items: center; gap: 8px; color: var(--colorNeutralForeground2); font-size: 14px; }
+.theme-toggle {
+  position: relative; width: 40px; height: 20px;
+  background: transparent;
+  border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--colorNeutralStrokeAccessible);
+  transition: all 0.2s ease; flex-shrink: 0;
+}
+.theme-toggle::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px; background: var(--colorNeutralStrokeAccessible);
+  border-radius: 50%; transition: all 0.2s ease;
+}
+.theme-toggle:focus-visible { box-shadow: 0 0 0 2px var(--colorCompoundBrandStroke); }
+.theme-toggle:hover { border-color: var(--colorNeutralStrokeAccessibleHover); }
+.theme-toggle:hover::after { background: var(--colorNeutralStrokeAccessibleHover); }
+.theme-toggle:active { border-color: var(--colorNeutralStrokeAccessiblePressed); }
+.theme-toggle:active::after { background: var(--colorNeutralStrokeAccessiblePressed); }
+.theme-toggle.active {
+  background: var(--colorCompoundBrandBackground);
+  border-color: transparent;
+}
+.theme-toggle.active::after { left: 22px; background: var(--colorNeutralForegroundInverted); }
+.theme-toggle.active:hover {
+  background: var(--colorCompoundBrandBackgroundHover);
+}
+.theme-toggle.active:active {
+  background: var(--colorCompoundBrandBackgroundPressed);
+}
+.theme-icon { font-size: 16px; line-height: 1; transition: opacity 0.2s ease; display: flex; align-items: center; }
+svg.fluent-icon { vertical-align: middle; flex-shrink: 0; }
+
+/* Header actions */
+.header-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+.btn-merge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 16px; border-radius: 4px;
+  font-size: 13px; font-weight: 600;
+  background: var(--colorBrandBackground);
+  color: #ffffff; border: none; cursor: pointer;
+  transition: background 0.15s ease;
+}
+.btn-merge:hover { background: var(--colorBrandBackgroundHover); }
+.btn-merge:active { background: var(--colorBrandBackgroundPressed); }
+.btn-merge:focus-visible { outline: 2px solid var(--colorCompoundBrandStroke); outline-offset: 1px; }
+
+/* Overview Cards */
+.overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 12px 0; }
+.stat-card {
+  background: var(--colorNeutralBackground1); border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 8px; padding: 16px; text-align: center;
+  transition: all 0.15s ease; box-shadow: var(--shadow2);
+}
+.stat-card:hover { box-shadow: var(--shadow4); border-color: var(--colorNeutralStroke1); }
+.stat-card .label { font-size: 12px; color: var(--colorNeutralForeground2); margin-bottom: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; }
+.stat-card .value { font-size: 32px; font-weight: 700; }
+.stat-card .sub { font-size: 12px; color: var(--colorNeutralForeground2); margin-top: 4px; }
+.stat-card.gold .value { color: var(--colorGoldText); }
+.stat-card.purple .value { color: var(--colorPurpleText); }
+.stat-card.blue .value { color: var(--colorBrandForeground1); }
+
+/* Pool Tabs */
+/* Fluent UI 2 TabList: Horizontal */
+.pool-tabs {
+  display: flex; gap: 0; margin: 12px 0 0; padding-bottom: 0;
+  position: relative; overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: thin;
+}
+.pool-tabs::after {
+  content: ''; position: absolute; bottom: 0; left: 0; right: 0;
+  height: 1px; background: var(--colorNeutralStroke2);
+}
+.pool-tabs::-webkit-scrollbar { height: 2px; }
+.pool-tabs::-webkit-scrollbar-thumb { background: var(--colorNeutralStroke3); border-radius: 1px; }
+.pool-tab {
+  position: relative; padding: 12px 10px; background: transparent; border: none;
+  cursor: pointer; font-size: 13px; color: var(--colorNeutralForeground2);
+  transition: color 0.15s ease, background 0.15s ease; white-space: nowrap;
+  font-weight: 400; flex-shrink: 0; z-index: 1;
+}
+.pool-tab::after {
+  content: ''; position: absolute; bottom: 0; left: 0; right: 0;
+  height: 3px; background: transparent;
+  transition: background 0.2s cubic-bezier(0.4,0,0.2,1);
+}
+.pool-tab:hover { color: var(--colorNeutralForeground1); background: var(--colorSubtleBackgroundHover); }
+.pool-tab:focus-visible { outline: 2px solid var(--colorCompoundBrandStroke); outline-offset: -2px; border-radius: 4px; }
+.pool-tab.active { color: var(--colorCompoundBrandForeground); font-weight: 600; background: transparent; }
+.pool-tab.active::after { background: var(--colorCompoundBrandStroke); }
+.pool-tab .count {
+  display: inline-block; background: var(--colorNeutralBackground4);
+  padding: 1px 7px 2px; border-radius: 10px; font-size: 11px;
+  margin-left: 5px; font-weight: 400; color: var(--colorNeutralForeground3);
+  vertical-align: middle; line-height: 16px; position: relative; top: 1px;
+}
+.pool-tab.active .count { background: var(--colorBrandBackground2); color: var(--colorCompoundBrandForeground); }
+#pool-content { margin-top: 12px; }
+
+/* Fluent Card */
+.fcard {
+  background: var(--colorNeutralBackground1); border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 8px; padding: 16px; box-shadow: var(--shadow2);
+  transition: background 0.3s ease, border-color 0.3s ease;
+}
+.fcard h3 { font-size: 13px; font-weight: 600; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--colorNeutralStroke2); color: var(--colorNeutralForeground2); text-transform: uppercase; letter-spacing: 0.6px; }
+.pool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+@media (max-width: 768px) { .pool-grid { grid-template-columns: 1fr; } }
+
+/* Pity Bar */
+.pity-item { margin-bottom: 12px; position: relative; }
+.pity-label { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 13px; color: var(--colorNeutralForeground2); }
+.pity-bar-track { height: 8px; background: var(--colorNeutralBackground4); border-radius: 4px; position: relative; overflow: visible; }
+.pity-soft-zone { position: absolute; right: 0; top: -1px; bottom: -1px; opacity: 0.15; pointer-events: none; border-radius: 0 3px 3px 0; }
+.pity-soft-zone.gold { background: var(--colorGold); width: 31.25%; }
+.pity-soft-zone.purple { background: var(--colorPurple); width: 30%; }
+.pity-fill { height: 100%; border-radius: 4px; transition: width 0.8s cubic-bezier(0.4,0,0.2,1); position: relative; z-index: 1; }
+.pity-fill.gold { background: var(--pityBarGold); }
+.pity-fill.purple { background: var(--pityBarPurple); }
+.pity-fill.red { background: var(--pityBarRed); }
+.pity-fill.gold.hot { background: var(--pityBarGold); animation: pulse 1.5s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.7} }
+.pity-milestone { position: absolute; top: -3px; height: calc(100% + 6px); width: 1px; background: var(--colorNeutralStrokeAccessible); z-index: 2; opacity: 0.5; }
+.pity-milestone-label { position: absolute; top: -18px; font-size: 10px; color: var(--colorNeutralForeground3); transform: translateX(-50%); white-space: nowrap; }
+.pity-status { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; margin-top: 6px; }
+.pity-status.small { background: var(--colorGreenSubtle); color: var(--colorGreenText); }
+.pity-status.big { background: var(--colorRedSubtle); color: var(--colorRedText); }
+.pity-status.no-up { background: var(--colorPurpleSubtle); color: var(--colorBrandForeground1); }
+.pity-status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.pity-prob-row { display: flex; gap: 16px; margin-top: 6px; font-size: 12px; color: var(--colorNeutralForeground3); }
+.pity-prob-item strong { color: var(--colorNeutralForeground1); margin-left: 2px; }
+.pity-prob-item.hot strong { color: var(--colorRedText); }
+
+/* Stats Grid */
+.stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+.stat-item { display: flex; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--colorNeutralStroke3); font-size: 13px; }
+.stat-item .label { color: var(--colorNeutralForeground2); }
+.stat-item .val { font-weight: 600; color: var(--colorNeutralForeground1); }
+
+/* Fluent UI 2 Table */
+.ftable { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 13px; }
+.ftable col { width: 14.286%; }
+.ftable thead th {
+  text-align: center; padding: 6px 8px; font-weight: 600; font-size: 12px;
+  color: var(--colorNeutralForeground3); background: transparent;
+  border-bottom: 1px solid var(--colorNeutralStroke2); white-space: nowrap;
+}
+.ftable tbody td {
+  padding: 5px 8px; border-bottom: 1px solid var(--colorNeutralStroke3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center;
+}
+.ftable tbody tr:hover td { background: var(--colorSubtleBackgroundHover); }
+.ftable tbody td.td-icon { padding: 3px 4px; }
+.ftable tbody td.td-icon img {
+  width: 26px; height: 26px; border-radius: 4px; object-fit: cover;
+  background: var(--colorNeutralBackground4); vertical-align: middle;
+}
+.ftable tbody tr.star5-row .td-icon img { box-shadow: 0 0 3px rgba(212,160,23,0.25); }
+.ftable tbody tr.star4-row .td-icon img { box-shadow: 0 0 2px rgba(135,100,184,0.2); }
+.ftable tbody td.td-num { color: var(--colorNeutralForeground3); font-size: 12px; }
+.ftable tbody td.td-name { font-weight: 600; color: var(--colorNeutralForeground1); }
+.ftable tbody td.td-type { color: var(--colorNeutralForeground3); }
+.ftable tbody td.td-pity { color: var(--colorNeutralForeground3); }
+.ftable tbody td.td-pity strong { font-weight: 700; color: var(--colorNeutralForeground1); }
+.ftable tbody td.td-time { color: var(--colorNeutralForeground3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.ftable tbody td.td-tag-empty {}
+.ftable tbody tr.star5-row td.td-name { color: var(--colorGoldText); }
+.ftable tbody tr.star5-row td.td-pity strong { color: var(--colorGoldText); }
+.ftable tbody tr.star4-row td.td-name { color: var(--colorPurpleText); }
+.ftable tbody tr.star4-row td.td-pity strong { color: var(--colorPurpleText); }
+
+.history-section { margin-bottom: 12px; }
+.history-section h3 { font-size: 13px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; color: var(--colorNeutralForeground2); text-transform: uppercase; letter-spacing: 0.6px; }
+
+/* Tags */
+.tag { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.2px; line-height: 18px; }
+.tag.up { background: var(--colorGreenSubtle); color: var(--colorGreenText); }
+.tag.lost { background: var(--colorRedSubtle); color: var(--colorRedText); }
+.tag.guaranteed { background: var(--colorOrangeSubtle); color: var(--colorOrangeText); }
+.tag.weapon-up { background: var(--colorCyanSubtle); color: var(--colorCyanText); }
+.tag.standard { background: var(--colorPurpleSubtle); color: var(--colorBrandForeground1); }
+
+/* Pity Distribution */
+.pity-dist { display: flex; align-items: flex-end; gap: 2px; height: 80px; padding: 8px 0; }
+.pity-bar-v { flex: 1; min-width: 8px; background: var(--colorGold); border-radius: 3px 3px 0 0; transition: height 0.4s ease; position: relative; }
+.pity-bar-v:hover { opacity: 0.8; }
+.pity-bar-v .tip { display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: var(--colorNeutralBackground6); color: var(--colorNeutralForeground1); padding: 2px 6px; border-radius: 4px; font-size: 11px; white-space: nowrap; z-index: 10; border: 1px solid var(--colorNeutralStroke1); }
+.pity-bar-v:hover .tip { display: block; }
+.pity-labels { display: flex; gap: 2px; font-size: 10px; color: var(--colorNeutralForeground3); }
+.pity-labels span { flex: 1; text-align: center; min-width: 8px; }
+
+/* Fluent UI 2 Divider */
+.fui-divider { display: block; margin: 8px 0; border: none; border-top: 1px solid var(--colorNeutralStroke2); }
+.fui-divider.inset { margin: 12px 0; }
+.fui-divider-brand { display: block; margin: 8px 0; border: none; border-top: 1px solid var(--colorCompoundBrandStroke); }
+.fui-divider-strong { display: block; margin: 8px 0; border: none; border-top: 1px solid var(--colorNeutralStroke1); }
+
+/* Footer */
+.footer { text-align: center; color: var(--colorNeutralForeground2); font-size: 12px; padding: 24px 0; margin-top: 12px; }
+
+/* Merge modal */
+.modal-overlay {
+  display: none; position: fixed; top:0; left:0; width:100%; height:100%;
+  background: rgba(0,0,0,0.5); z-index: 1000;
+  align-items: center; justify-content: center;
+}
+.modal-overlay.show { display: flex; }
+.modal {
+  background: var(--colorNeutralBackground1);
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 12px; padding: 32px;
+  max-width: 480px; width: 90%;
+  box-shadow: var(--shadow8);
+}
+.modal h2 { font-size: 18px; font-weight: 600; margin-bottom: 8px; color: var(--colorNeutralForeground1); }
+.modal .desc { font-size: 13px; color: var(--colorNeutralForeground2); margin-bottom: 20px; line-height: 1.6; }
+.modal .upload-zone {
+  border: 2px dashed var(--colorNeutralStroke1);
+  border-radius: 8px; padding: 28px 16px;
+  cursor: pointer; transition: all 0.2s ease;
+  position: relative; text-align: center;
+}
+.modal .upload-zone:hover, .modal .upload-zone.dragover {
+  border-color: var(--colorBrandForeground1);
+  background: rgba(0,120,212,0.04);
+}
+.modal .upload-zone .zone-icon { color: var(--colorNeutralForeground3); margin-bottom: 8px; display: flex; justify-content: center; }
+.modal .upload-zone:hover .zone-icon { color: var(--colorBrandForeground1); }
+.modal .upload-zone .text { font-size: 13px; color: var(--colorNeutralForeground2); }
+.modal .upload-zone .text strong { color: var(--colorBrandForeground1); }
+.modal .upload-zone input[type="file"] {
+  position: absolute; top:0; left:0; width:100%; height:100%;
+  opacity: 0; cursor: pointer;
+}
+/* Toast */
+.toast-container { position: fixed; bottom: 16px; right: 20px; width: 292px; pointer-events: none; z-index: 9999; }
+.toast {
+  pointer-events: all; display: grid; grid-template-columns: auto 1fr auto;
+  padding: 12px; border-radius: 4px; border: 1px solid transparent;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.14), 0 0 2px rgba(0,0,0,0.12);
+  background: var(--colorNeutralBackground1); color: var(--colorNeutralForeground1);
+  font-size: 14px; line-height: 20px; margin-top: 16px;
+  animation: toast-in 0.25s cubic-bezier(0.4,0,0.2,1) forwards;
+}
+[data-theme="dark"] .toast { background: #292929; color: #e0e0e0; }
+.toast__media { display: flex; padding-top: 2px; padding-right: 8px; font-size: 16px; align-items: flex-start; }
+.toast__content { grid-column: 2 / 3; min-width: 0; }
+.toast__title { font-weight: 600; word-break: break-word; }
+.toast__body { padding-top: 4px; font-weight: 400; font-size: 14px; color: var(--colorNeutralForeground2); word-break: break-word; }
+[data-theme="dark"] .toast__body { color: #c4c4c4; }
+.toast__close {
+  grid-column: 3; display: flex; align-items: flex-start; padding-left: 12px;
+  background: none; border: none; cursor: pointer; color: var(--colorNeutralForeground3);
+  padding: 0; font-size: 16px; line-height: 1;
+}
+.toast__close:hover { color: var(--colorNeutralForeground1); }
+.toast--success .toast__media { color: #0f7b0f; }
+[data-theme="dark"] .toast--success .toast__media { color: #9edcab; }
+.toast--error .toast__media { color: #d13438; }
+[data-theme="dark"] .toast--error .toast__media { color: #f5a5ae; }
+.toast--warning .toast__media { color: #9d5d00; }
+[data-theme="dark"] .toast--warning .toast__media { color: #f7c67f; }
+.toast--info .toast__media { color: #616161; }
+[data-theme="dark"] .toast--info .toast__media { color: #e0e0e0; }
+.toast--exit { animation: toast-out 0.2s cubic-bezier(0.4,0,0.2,1) forwards; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes toast-out { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(-4px); } }
+.modal-close {
+  position: absolute; top: 16px; right: 16px;
+  background: none; border: none; cursor: pointer;
+  color: var(--colorNeutralForeground2);
+  padding: 4px; display: flex; align-items: center; justify-content: center;
+  border-radius: 4px; transition: background 0.15s, color 0.15s;
+}
+.modal-close:hover { background: var(--colorNeutralBackground4); color: var(--colorNeutralForeground1); }
+
+/* ── 抽卡记录宫格/横向 ── */
+.record-view-toggle {
+  display: flex; gap: 2px; background: var(--colorNeutralBackground3);
+  border-radius: 4px; padding: 2px; margin-bottom: 12px; width: fit-content;
+}
+.record-view-toggle .toggle-btn {
+  display: flex; align-items: center; gap: 4px;
+  padding: 4px 12px; border-radius: 3px; border: none;
+  background: transparent; color: var(--colorNeutralForeground2);
+  cursor: pointer; font-size: 12px; font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+.record-view-toggle .toggle-btn.active {
+  background: var(--colorNeutralBackground1);
+  color: var(--colorNeutralForeground1);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.record-view-toggle .toggle-btn svg { width: 14px; height: 14px; }
+
+/* 宫格排列 — 零间隙，padding 模拟间距，整个格子都是悬停区域 */
+.grid-records {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 0; padding: 0;
+}
+.grid-card {
+  position: relative; display: flex; flex-direction: column;
+  align-items: center; padding: 3px; cursor: default;
+  background: transparent; border: none; border-radius: 0;
+  transition: background 0.1s;
+}
+.grid-card .card-inner {
+  display: flex; flex-direction: column; align-items: center;
+  padding: 8px 4px 6px; border-radius: 8px; width: 100%;
+  background: var(--colorNeutralBackground1);
+  border: 1px solid var(--colorNeutralStroke2);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.grid-card:hover .card-inner { border-color: var(--colorNeutralStroke1); box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.grid-card.same-time-highlight .card-inner {
+  background: var(--colorBrandBackground2);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+.grid-card:hover.same-time-highlight .card-inner {
+  box-shadow: 0 3px 10px rgba(0,0,0,0.12);
+}
+.grid-card.star5 .card-inner { border-color: rgba(255,180,0,0.45); }
+[data-theme="dark"] .grid-card.star5 .card-inner { border-color: rgba(255,200,50,0.35); }
+.grid-card.star5:hover .card-inner { border-color: rgba(255,180,0,0.7); }
+.grid-card.star5.same-time-highlight .card-inner { border-color: rgba(255,180,0,0.6); background: var(--colorBrandBackground2); }
+[data-theme="dark"] .grid-card.star5.same-time-highlight .card-inner { border-color: rgba(255,200,50,0.5); }
+.grid-card.star4 .card-inner { border-color: rgba(160,90,220,0.35); }
+[data-theme="dark"] .grid-card.star4 .card-inner { border-color: rgba(180,120,240,0.3); }
+.grid-card.star4:hover .card-inner { border-color: rgba(160,90,220,0.6); }
+.grid-card.star4.same-time-highlight .card-inner { border-color: rgba(160,90,220,0.5); background: var(--colorBrandBackground2); }
+[data-theme="dark"] .grid-card.star4.same-time-highlight .card-inner { border-color: rgba(180,120,240,0.45); }
+.grid-card .card-icon {
+  width: 56px; height: 56px; border-radius: 50%;
+  object-fit: cover; margin-bottom: 4px;
+}
+.grid-card .card-name {
+  font-size: 12px; line-height: 1.4; color: var(--colorNeutralForeground2);
+  text-align: center; width: 100%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; padding: 0 2px;
+}
+.grid-card.star5 .card-name { color: var(--colorGoldText); font-weight: 600; }
+.grid-card.star4 .card-name { color: var(--colorPurpleText); font-weight: 600; }
+.grid-card .card-badge {
+  position: absolute; top: 7px; left: 7px; font-size: 10px;
+  background: var(--colorNeutralBackground4); color: var(--colorNeutralForeground3);
+  border-radius: 3px; padding: 0 4px; line-height: 16px;
+}
+.grid-card.star5 .card-badge { background: rgba(255,180,0,0.15); color: var(--colorGoldText); }
+.grid-card.star4 .card-badge { background: rgba(160,90,220,0.12); color: var(--colorPurpleText); }
+.grid-card .card-tag {
+  position: absolute; top: 7px; right: 7px; font-size: 9px;
+  border-radius: 3px; padding: 0 4px; line-height: 15px; font-weight: 600;
+}
+.grid-card .card-tag.up { background: rgba(255,180,0,0.15); color: var(--colorGoldText); }
+.grid-card .card-tag.lost { background: rgba(220,60,60,0.12); color: var(--colorRedText); }
+.grid-card .card-tag.guaranteed { background: rgba(220,60,60,0.12); color: var(--colorRedText); }
+
+/* Fluent UI 2 Tooltip */
+.gacha-tooltip {
+  position: fixed; z-index: 9999; pointer-events: none;
+  padding: 6px 10px; border-radius: 4px;
+  font-size: 12px; line-height: 1.5; max-width: 240px;
+  background: var(--colorNeutralBackground1);
+  border: 1px solid var(--colorNeutralStroke1);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.14), 0 1px 4px rgba(0,0,0,0.08);
+  color: var(--colorNeutralForeground1);
+  opacity: 0; transform: translateY(4px);
+  transition: opacity 0.15s cubic-bezier(0.4,0,0.2,1), transform 0.15s cubic-bezier(0.4,0,0.2,1);
+}
+[data-theme="dark"] .gacha-tooltip {
+  box-shadow: 0 4px 16px rgba(0,0,0,0.36), 0 1px 4px rgba(0,0,0,0.2);
+}
+.gacha-tooltip.visible { opacity: 1; transform: translateY(0); }
+.gacha-tooltip .tt-name { font-weight: 600; margin-bottom: 2px; }
+.gacha-tooltip .tt-star5 .tt-name { color: var(--colorGoldText); }
+.gacha-tooltip .tt-star4 .tt-name { color: var(--colorPurpleText); }
+.gacha-tooltip .tt-meta { color: var(--colorNeutralForeground3); font-size: 11px; }
+
+/* 聚焦模式：鼠标在宫格区域内时所有卡片灰化，只高亮同时间卡片 */
+.grid-records.in-focus .grid-card {
+  filter: saturate(0.2) brightness(0.75);
+  transition: filter 0.15s cubic-bezier(0.4,0,0.2,1);
+}
+[data-theme="dark"] .grid-records.in-focus .grid-card {
+  filter: saturate(0.15) brightness(0.65);
+}
+.grid-records.in-focus .grid-card.same-time-highlight {
+  filter: none;
+  transition: filter 0.1s cubic-bezier(0.4,0,0.2,1);
+}
+
+/* 横向排列 — 保底进度条 */
+.tl-pity-timeline { padding: 4px 0; display: flex; flex-direction: column; gap: 10px; }
+.tl-row { display: flex; align-items: center; gap: 0; }
+.tl-bar-track {
+  flex: 1; height: 32px; border-radius: 6px; position: relative; overflow: hidden;
+  background: var(--colorNeutralBackground3);
+}
+.tl-bar-fill {
+  height: 100%; border-radius: 6px; transition: width 0.4s cubic-bezier(0.4,0,0.2,1);
+}
+.tl-bar-fill.up { background: #107c10; }
+[data-theme="dark"] .tl-bar-fill.up { background: #0e7a0e; }
+.tl-bar-fill.lost { background: #d48c00; }
+[data-theme="dark"] .tl-bar-fill.lost { background: #c78c10; }
+.tl-bar-fill.guaranteed {
+  background: repeating-linear-gradient(
+    -45deg, #107c10, #107c10 4px, #18961e 4px, #18961e 8px
+  );
+}
+[data-theme="dark"] .tl-bar-fill.guaranteed {
+  background: repeating-linear-gradient(
+    -45deg, #0e7a0e, #0e7a0e 4px, #1a9c22 4px, #1a9c22 8px
+  );
+}
+.tl-bar-fill.standard { background: var(--colorNeutralForeground3); }
+.tl-bar-fill.current { background: #0078d4; }
+[data-theme="dark"] .tl-bar-fill.current { background: #479ef5; }
+.tl-bar-text {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  font-size: 12px; color: var(--colorNeutralForegroundOnAccent);
+  white-space: nowrap; font-weight: 600;
+}
+.tl-bar-end {
+  display: flex; align-items: center; gap: 8px; margin-left: 10px; flex-shrink: 0;
+}
+.tl-s5-icon {
+  width: 44px; height: 44px; border-radius: 6px; object-fit: cover;
+  border: 2px solid rgba(255,180,0,0.6); background: var(--colorNeutralBackground1);
+}
+[data-theme="dark"] .tl-s5-icon { border-color: rgba(255,200,50,0.5); }
+.tl-s5-icon.placeholder { background: var(--colorNeutralBackground3); }
+.tl-s5-info { display: flex; flex-direction: column; gap: 1px; min-width: 60px; }
+.tl-s5-name { font-size: 13px; color: var(--colorGoldText); font-weight: 600; line-height: 1.3; white-space: nowrap; }
+.tl-s5-pity { font-size: 11px; color: var(--colorNeutralForeground3); line-height: 1.4; }
+.tl-tag {
+  display: inline-block; font-size: 10px; padding: 0 5px; border-radius: 3px;
+  line-height: 16px; font-weight: 600; margin-top: 1px;
+}
+.tl-tag.up { background: rgba(16,124,16,0.12); color: #107c10; }
+[data-theme="dark"] .tl-tag.up { background: rgba(16,124,16,0.2); color: #6ccb5f; }
+.tl-tag.lost { background: rgba(212,140,0,0.12); color: #d48c00; }
+[data-theme="dark"] .tl-tag.lost { background: rgba(212,140,0,0.2); color: #f0b030; }
+.tl-tag.guaranteed { background: rgba(16,124,16,0.12); color: #107c10; }
+[data-theme="dark"] .tl-tag.guaranteed { background: rgba(16,124,16,0.2); color: #6ccb5f; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="container header-inner">
+    <div>
+      <h1>鸣潮抽卡分析</h1>
+      <div class="meta" id="header-meta">UID: - | 数据截至: -</div>
+    </div>
+    <div class="header-actions">
+      <button class="btn-merge" onclick="downloadData()"><svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" style="flex-shrink:0"><path d="M15.5 17a.5.5 0 0 1 .09 1H4.5a.5.5 0 0 1-.09-1H15.5ZM10 2a.5.5 0 0 1 .5.41V14.3l3.64-3.65a.5.5 0 0 1 .64-.06l.07.06c.17.17.2.44.06.63l-.06.07-4.5 4.5a.5.5 0 0 1-.25.14L10 16a.5.5 0 0 1-.4-.2l-4.46-4.45a.5.5 0 0 1 .64-.76l.07.06 3.65 3.64V2.5c0-.27.22-.5.5-.5Z"/></svg> 下载当前记录</button>
+      <button class="btn-merge" onclick="showMergeModal()"><svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" style="flex-shrink:0"><path d="M10 2.5c.28 0 .5.22.5.5v6.5H17a.5.5 0 0 1 0 1h-6.5V17a.5.5 0 0 1-1 0v-6.5H3a.5.5 0 0 1 0-1h6.5V3c0-.28.22-.5.5-.5Z"/></svg> 合并抽卡记录</button>
+      <div class="theme-switch">
+        <span class="theme-icon" id="theme-icon-light"><svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2c.28 0 .5.22.5.5v1a.5.5 0 0 1-1 0v-1c0-.28.22-.5.5-.5Zm0 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0-1a3 3 0 1 1 0-6 3 3 0 0 1 0 6Zm7.5-2.5a.5.5 0 0 0 0-1h-1a.5.5 0 0 0 0 1h1ZM10 16c.28 0 .5.22.5.5v1a.5.5 0 0 1-1 0v-1c0-.28.22-.5.5-.5Zm-6.5-5.5a.5.5 0 0 0 0-1H2.46a.5.5 0 0 0 0 1H3.5Zm.65-6.35c.2-.2.5-.2.7 0l1 1a.5.5 0 1 1-.7.7l-1-1a.5.5 0 0 1 0-.7Zm.7 11.7a.5.5 0 0 1-.7-.7l1-1a.5.5 0 0 1 .7.7l-1 1Zm11-11.7a.5.5 0 0 0-.7 0l-1 1a.5.5 0 0 0 .7.7l1-1a.5.5 0 0 0 0-.7Zm-.7 11.7a.5.5 0 0 0 .7-.7l-1-1a.5.5 0 0 0-.7.7l1 1Z"/></svg></span>
+        <div class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" role="switch" tabindex="0" aria-label="切换深浅主题"></div>
+        <span class="theme-icon" id="theme-icon-dark"><svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path d="M15.5 13.5A6.98 6.98 0 0 1 4 14.39c2.83-1.09 4.56-2.42 5.6-4.4 1.04-2 1.33-4.16.75-6.9A6.98 6.98 0 0 1 15.5 13.5ZM5.45 16.92A7.98 7.98 0 1 0 9.88 2.04a.6.6 0 0 0-.61.73c.69 2.82.43 4.88-.55 6.76-.94 1.78-2.55 3.03-5.55 4.1a.6.6 0 0 0-.3.9 7.95 7.95 0 0 0 2.59 2.39Z"/></svg></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+  <div id="overview" class="overview"></div>
+  <div id="pool-tabs" class="pool-tabs"></div>
+  <div id="pool-content"></div>
+  <hr class="fui-divider inset">
+  <div class="footer">
+    数据来源：游戏内唤取记录 | 保底规则：5星80抽硬保底（新手池50抽），4星10抽硬保底<br>
+    角色活动池5星保底跨池共享 | 武器活动池5星保底跨池共享 | 联动池保底仅在相同联动主题内共享<br>
+    注意：API仅能获取近6个月数据 | UP/歪判定为基于常驻角色列表估算，仅供参考
+  </div>
+</div>
+
+<!-- 合并抽卡记录弹窗 -->
+<div class="modal-overlay" id="merge-modal">
+  <div class="modal" style="position:relative">
+    <button class="modal-close" onclick="hideMergeModal()"><svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="m4.09 4.22.06-.07a.5.5 0 0 1 .63-.06l.07.06L10 9.29l5.15-5.14a.5.5 0 0 1 .63-.06l.07.06c.18.17.2.44.06.63l-.06.07L10.71 10l5.14 5.15c.18.17.2.44.06.63l-.06.07a.5.5 0 0 1-.63.06l-.07-.06L10 10.71l-5.15 5.14a.5.5 0 0 1-.63.06l-.07-.06a.5.5 0 0 1-.06-.63l.06-.07L9.29 10 4.15 4.85a.5.5 0 0 1-.06-.63l.06-.07-.06.07Z"/></svg></button>
+    <h2>合并抽卡记录</h2>
+    <div class="desc">上传历史抽卡记录JSON文件，将与当前数据合并。合并采用截断+接续策略，保留原始排列顺序。</div>
+    <div class="upload-zone" id="merge-zone">
+      <div class="zone-icon" style="justify-content:center"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M3.5 6.25c0-.97.78-1.75 1.75-1.75h2.88c.2 0 .39.08.53.22l2.06 2.06c.14.14.33.22.53.22h5.5c.97 0 1.75.78 1.75 1.75 0 .09.01.17.04.25H8.72c-1.34 0-2.58.71-3.25 1.87L3.5 14.28V6.25ZM2 17.79A3.25 3.25 0 0 0 5.25 21h11.04c1.33 0 2.57-.72 3.24-1.88l3.03-5.25A3.25 3.25 0 0 0 19.96 9a.75.75 0 0 0 .04-.25c0-1.8-1.45-3.25-3.25-3.25h-5.19L9.72 3.66c-.42-.42-1-.66-1.6-.66H5.26A3.25 3.25 0 0 0 2 6.25V17.79Zm6.72-7.3h11.03a1.75 1.75 0 0 1 1.51 2.63l-3.03 5.25c-.4.7-1.14 1.13-1.95 1.13H5.25a1.75 1.75 0 0 1-1.51-2.63l3.03-5.25c.4-.7 1.14-1.12 1.95-1.12Z"/></svg></div>
+      <div class="text">拖拽文件到此处，或 <strong>点击选择文件</strong></div>
+      <input type="file" id="merge-input" accept=".json" onchange="handleMerge(this.files[0])">
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// Toast System
+// ============================================================
+const TOAST_ICONS = {
+  success: '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm3.36 6.65-3.75 4.5a.5.5 0 0 1-.72.04l-2.25-2a.5.5 0 1 1 .66-.76l1.87 1.66 3.42-4.1a.5.5 0 0 1 .77.66Z"/></svg>',
+  error: '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M3.86 3.15a.5.5 0 0 0-.71.7L9.29 10l-6.14 6.15a.5.5 0 0 0 .7.7L10 10.72l6.15 6.14a.5.5 0 0 0 .7-.71L10.72 10l6.14-6.15a.5.5 0 0 0-.7-.7L10 9.29 3.86 3.14Z"/></svg>',
+  warning: '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 11.5a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5ZM10 6a.5.5 0 0 1 .5.41V11.59a.5.5 0 0 1-1 0V6.41A.5.5 0 0 1 10 6Z"/></svg>',
+  info: '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm.5 5.5a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM10 9a.5.5 0 0 1 .5.41V14.59a.5.5 0 0 1-1 0V9.41A.5.5 0 0 1 10 9Z"/></svg>'
+};
+
+function showToast(intent, title, body, duration) {
+  const container = document.getElementById('toast-container');
+  const el = document.createElement('div');
+  el.className = 'toast toast--' + intent;
+  el.innerHTML = '<div class="toast__media">' + (TOAST_ICONS[intent] || TOAST_ICONS.info) + '</div>' +
+    '<div class="toast__content"><div class="toast__title">' + title + '</div>' +
+    (body ? '<div class="toast__body">' + body + '</div>' : '') + '</div>' +
+    '<button class="toast__close" onclick="dismissToast(this.parentElement)"><svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="m4.09 4.22.06-.07a.5.5 0 0 1 .63-.06l.07.06L10 9.29l5.15-5.14a.5.5 0 0 1 .63-.06l.07.06c.18.17.2.44.06.63l-.06.07L10.71 10l5.14 5.15c.18.17.2.44.06.63l-.06.07a.5.5 0 0 1-.63.06l-.07-.06L10 10.71l-5.15 5.14a.5.5 0 0 1-.63.06l-.07-.06a.5.5 0 0 1-.06-.63l.06-.07L9.29 10 4.15 4.85a.5.5 0 0 1-.06-.63l.06-.07-.06.07Z"/></svg></button>';
+  container.appendChild(el);
+  const timeout = duration !== undefined ? duration : 3000;
+  if (timeout > 0) setTimeout(() => dismissToast(el), timeout);
+}
+
+function dismissToast(el) {
+  if (!el || el.classList.contains('toast--exit')) return;
+  el.classList.add('toast--exit');
+  setTimeout(() => el.remove(), 200);
+}
+
+// ============================================================
+// Theme Management
+// ============================================================
+const storageKey = 'wuwa-theme';
+const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+
+function getSystemTheme() { return mediaQuery.matches ? 'dark' : 'light'; }
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const toggle = document.getElementById('theme-toggle');
+  if (toggle) toggle.classList.toggle('active', theme === 'dark');
+  const lightIcon = document.getElementById('theme-icon-light');
+  const darkIcon = document.getElementById('theme-icon-dark');
+  if (lightIcon) lightIcon.style.opacity = theme === 'light' ? '1' : '0.4';
+  if (darkIcon) darkIcon.style.opacity = theme === 'dark' ? '1' : '0.4';
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  localStorage.setItem(storageKey, next);
+  applyTheme(next);
+}
+
+(function initTheme() {
+  const saved = localStorage.getItem(storageKey);
+  applyTheme(saved || getSystemTheme());
+})();
+mediaQuery.addEventListener('change', e => {
+  if (!localStorage.getItem(storageKey)) applyTheme(e.matches ? 'dark' : 'light');
+});
+document.addEventListener('keydown', e => {
+  if (e.target.id === 'theme-toggle' && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggleTheme(); }
+});
+
+// ============================================================
+// Merge Modal
+// ============================================================
+function showMergeModal() { document.getElementById('merge-modal').classList.add('show'); }
+function hideMergeModal() { document.getElementById('merge-modal').classList.remove('show'); }
+
+function downloadData() {
+  if (!RAW_DATA || !Object.keys(RAW_DATA).some(k => k !== 'uid' && Array.isArray(RAW_DATA[k]) && RAW_DATA[k].length)) {
+    showToast('warning', '暂无数据', '当前没有可下载的抽卡记录'); return;
+  }
+  const uid = RAW_DATA.uid || 'unknown';
+  const now = new Date();
+  const ts = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0')
+    + '_' + String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + String(now.getSeconds()).padStart(2,'0');
+  const blob = new Blob([JSON.stringify(RAW_DATA, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `uid_${uid}_${ts}_merged.json`;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
+const mergeZone = document.getElementById('merge-zone');
+mergeZone.addEventListener('dragover', e => { e.preventDefault(); mergeZone.classList.add('dragover'); });
+mergeZone.addEventListener('dragleave', () => mergeZone.classList.remove('dragover'));
+mergeZone.addEventListener('drop', e => {
+  e.preventDefault(); mergeZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) handleMerge(e.dataTransfer.files[0]);
+});
+
+// Close modal on overlay click
+document.getElementById('merge-modal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) hideMergeModal();
+});
+
+function handleMerge(file) {
+  if (!file) return;
+  showToast('info', '正在合并', file.name);
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  fetch('/api/merge', { method: 'POST', body: formData })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        showToast('success', '合并成功', '共' + data.total + '条记录，正在刷新...', 3000);
+        setTimeout(() => { hideMergeModal(); loadAndRender(); }, 1000);
+      } else {
+        showToast('error', '合并失败', data.error || '未知错误');
+      }
+    })
+    .catch(err => {
+      showToast('error', '网络错误', err.message);
+    });
+}
+
+// ============================================================
+// Data & Analysis (from original gacha_report.py)
+// ============================================================
+let RAW_DATA = {};
+let ICON_MAP = {};
+
+function getIconUrl(resourceId) {
+  if (!resourceId || !ICON_MAP[resourceId]) return '';
+  return ICON_MAP[resourceId];
+}
+
+const POOL_CONFIG = {
+  "1":  { name: "角色活动唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "character", hasUP4: true, up4Type: "character", crossPoolPity: "char-event" },
+  "2":  { name: "武器活动唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "weapon-guaranteed", hasUP4: true, up4Type: "weapon", crossPoolPity: "weapon-event" },
+  "3":  { name: "角色常驻唤取", pity5: 80, pity4: 10, hasUP5: false, hasUP4: false },
+  "4":  { name: "武器常驻唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "weapon-selected", hasUP4: false },
+  "5":  { name: "新手唤取",     pity5: 50, pity4: 10, hasUP5: false, hasUP4: false },
+  "6":  { name: "新手自选唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "character-selected", hasUP4: false },
+  "7":  { name: "感恩定向唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "character-selected", hasUP4: false },
+  "8":  { name: "角色新旅唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "character", hasUP4: true, up4Type: "character" },
+  "9":  { name: "武器新旅唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "weapon-selected", hasUP4: true, up4Type: "weapon" },
+  "10": { name: "角色联动唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "character-collab", hasUP4: true, up4Type: "character-collab", crossPoolPity: "char-collab" },
+  "11": { name: "武器联动唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "weapon-guaranteed-collab", hasUP4: true, up4Type: "weapon-collab", crossPoolPity: "weapon-collab" },
+};
+
+const STANDARD_5STAR_CHARS = new Set(['维里奈','凌阳','卡卡罗','鉴心','安可']);
+
+// ============================================================
+// Probability Model (NGA-verified: 0.8% base, +9.02%/pull from pull 70)
+// ============================================================
+function get5StarPullProb(pity, maxPity) {
+  if (pity >= maxPity) return 1;
+  if (pity < 0) pity = 0;
+  const BASE = 0.008;
+  if (maxPity === 80) {
+    if (pity < 70) return BASE;
+    const INC = 0.0902;
+    return Math.min(1, BASE + (pity - 69) * INC);
+  }
+  if (maxPity === 50) {
+    // 新手池: 无公开数据，按比例估算
+    if (pity < 40) return BASE;
+    return Math.min(1, BASE + (pity - 39) * 0.0526);
+  }
+  return BASE;
+}
+
+function getCumulativeProb(pity, maxPity, ahead) {
+  // 从当前pity开始，未来ahead抽内出5星的概率
+  let p = 1;
+  for (let i = 0; i < ahead; i++) {
+    p *= (1 - get5StarPullProb(pity + i, maxPity));
+  }
+  return 1 - p;
+}
+
+function get4StarPullProb(pity, maxPity) {
+  if (pity >= maxPity) return 1;
+  if (pity < 0) pity = 0;
+  const BASE = 0.06;
+  if (pity < 7) return BASE;
+  // 10抽保底: 7抽开始概率递增
+  return Math.min(1, BASE + (pity - 6) * 0.28);
+}
+
+function normalizeData(raw) {
+  const data = { uid: raw.uid || '' };
+  for (const [key, val] of Object.entries(raw)) {
+    if (key === 'uid' || !Array.isArray(val)) continue;
+    let poolId = key;
+    if (!/^\\d+$/.test(key)) {
+      const m = { '角色活动唤取':'1','武器活动唤取':'2','角色常驻唤取':'3','武器常驻唤取':'4',
+        '新手唤取':'5','新手自选唤取':'6','感恩定向唤取':'7',
+        '角色精准调谐':'1','武器精准调谐':'2','角色调谐（常驻池）':'3','武器调谐（常驻池）':'4',
+        '新手调谐':'5','自选调谐':'6','常驻调谐':'7' };
+      poolId = m[key] || key;
+    }
+    const records = val.map(r => ({ ...r, qualityLevel: Number(r.qualityLevel)||3, resourceId: Number(r.resourceId)||0, count: Number(r.count)||1 }));
+    if (!data[poolId]) data[poolId] = [];
+    data[poolId] = data[poolId].concat(records);
+  }
+  return data;
+}
+
+function analyzePool(records, poolId) {
+  if (!records || !records.length) return null;
+  const cfg = POOL_CONFIG[poolId] || { pity5:80, pity4:10, hasUP5:false, hasUP4:false };
+  // 数据本身已是倒序(最新在前)，直接反转为时间升序(最旧在前)
+  // 不能用 sort，因为同时间戳的记录顺序代表抽卡先后，sort 会打乱顺序
+  const sorted = [...records].reverse();
+  let cur5=0, cur4=0, gs5='small', gs4='small';
+  const s5=[], s4=[];
+
+  for (let i=0; i<sorted.length; i++) {
+    const r=sorted[i]; cur5++; cur4++;
+
+    if (r.qualityLevel===5) {
+      let tag='';
+      if (cfg.hasUP5) {
+        if (cfg.up5Type === 'weapon-guaranteed' || cfg.up5Type === 'weapon-guaranteed-collab') { tag = 'up'; }
+        else if (cfg.up5Type === 'weapon-selected') { tag = 'selected'; }
+        else if (cfg.up5Type === 'character-selected') { tag = 'selected'; }
+        else if (cfg.up5Type === 'character' || cfg.up5Type === 'character-collab') {
+          // 身份优先：先判断是否常驻角色，再判断保底状态
+          if (STANDARD_5STAR_CHARS.has(r.name)) { tag = 'lost'; gs5 = 'big'; }
+          else if (r.resourceType === '武器') { tag = 'lost'; gs5 = 'big'; }
+          else if (gs5 === 'big') { tag = 'guaranteed'; gs5 = 'small'; }
+          else { tag = 'up'; gs5 = 'small'; }
+        }
+      } else { tag = 'standard'; }
+      s5.push({...r, pity:cur5, upTag:tag}); cur5=0;
+    }
+
+    if (r.qualityLevel===4) {
+      let tag4='';
+      if (cfg.hasUP4) {
+        if (cfg.up4Type === 'character' || cfg.up4Type === 'character-collab') {
+          if (gs4 === 'big') { tag4 = 'up4-guaranteed'; gs4 = 'small'; }
+          else if (r.resourceType === '角色') { tag4 = 'char4'; }
+          else { tag4 = 'lost4'; gs4 = 'big'; }
+        } else if (cfg.up4Type === 'weapon' || cfg.up4Type === 'weapon-collab') {
+          if (gs4 === 'big') { tag4 = 'up4-guaranteed'; gs4 = 'small'; }
+          else if (r.resourceType === '武器') { tag4 = 'weapon4'; }
+          else { tag4 = 'lost4'; gs4 = 'big'; }
+        }
+      } else { tag4 = 'normal4'; }
+      s4.push({...r, pity:cur4, upTag4:tag4}); cur4=0;
+    }
+  }
+
+  const n5=s5.length, n4=s4.length, n3=sorted.filter(r=>r.qualityLevel===3).length;
+  const avg5 = n5 ? s5.reduce((s,r)=>s+r.pity,0)/n5 : 0;
+  const min5 = n5 ? Math.min(...s5.map(r=>r.pity)) : 0;
+  const max5 = n5 ? Math.max(...s5.map(r=>r.pity)) : 0;
+  const dist={};
+  for (const s of s5) { const b=Math.ceil(s.pity/10)*10; dist[b]=(dist[b]||0)+1; }
+  const avg4 = n4 ? s4.reduce((s,r)=>s+r.pity,0)/n4 : 0;
+
+  return { total:sorted.length, stars5:s5, stars4:s4, s5Count:n5, s4Count:n4, s3Count:n3,
+    current5Pity:cur5, current4Pity:cur4, guaranteeState5:gs5, guaranteeState4:gs4,
+    avgPity5:avg5, avgPity4:avg4, minPity5:min5, maxPity5:max5, pityDist:dist,
+    pity5Max:cfg.pity5, pity4Max:cfg.pity4,
+    hasUP5:cfg.hasUP5, up5Type:cfg.up5Type||'',
+    hasUP4:cfg.hasUP4, up4Type:cfg.up4Type||'',
+    crossPoolPity:cfg.crossPoolPity||'',
+    poolName:cfg.name };
+}
+
+function renderOverview(all) {
+  let tp=0, t5=0, t4=0, tap=0, pc=0;
+  for (const [,a] of Object.entries(all)) {
+    if (!a) continue; tp+=a.total; t5+=a.s5Count; t4+=a.s4Count;
+    if (a.s5Count>0) { tap+=a.avgPity5*a.s5Count; pc+=a.s5Count; }
+  }
+  const avg=pc?(tap/pc).toFixed(1):'-';
+  const label=pc?(avg<=40?'超级欧皇':avg<=50?'比较幸运':avg<=58?'正常水平':avg<=68?'有点非酋':'非酋本酋'):'暂无数据';
+  const color=pc?(avg<=40?'var(--colorGreenText)':avg<=50?'var(--colorCyanText)':avg<=58?'var(--colorGoldText)':avg<=68?'var(--colorOrangeText)':'var(--colorRedText)'):'var(--colorNeutralForeground3)';
+  document.getElementById('overview').innerHTML = `
+    <div class="stat-card blue"><div class="label">总抽数</div><div class="value">${tp.toLocaleString()}</div><div class="sub">全部卡池</div></div>
+    <div class="stat-card gold"><div class="label">5星总数</div><div class="value">${t5}</div><div class="sub">${tp?(t5/tp*100).toFixed(2):0}% 出率</div></div>
+    <div class="stat-card purple"><div class="label">4星总数</div><div class="value">${t4}</div><div class="sub">${tp?(t4/tp*100).toFixed(2):0}% 出率</div></div>
+    <div class="stat-card"><div class="label">欧非评价</div><div class="value" style="color:${color}">${label}</div><div class="sub">5星平均 ${avg} 抽出金</div></div>`;
+}
+
+function renderPoolTabs(all) {
+  let html='', first=true;
+  for (const pid of Object.keys(POOL_CONFIG)) {
+    const a=all[pid], cnt=a?a.total:0;
+    if (!cnt && !['1','2','4','5','6','10','11'].includes(pid)) continue;
+    html+=`<div class="pool-tab ${first?'active':''}" data-pool="${pid}" onclick="switchPool('${pid}')">${POOL_CONFIG[pid].name}<span class="count">${cnt}</span></div>`;
+    first=false;
+  }
+  document.getElementById('pool-tabs').innerHTML = html;
+}
+
+function renderPoolContent(pid, a) {
+  const el = document.getElementById('pool-content');
+  if (!a) { el.innerHTML='<div style="text-align:center;color:var(--colorNeutralForeground3);padding:40px">该卡池暂无抽卡记录</div>'; return; }
+
+  const p5=a.s5Count?(a.s5Count/a.total*100).toFixed(2):'0.00';
+  const p4=a.s4Count?(a.s4Count/a.total*100).toFixed(2):'0.00';
+  const pity5pct=Math.min(100,a.current5Pity/a.pity5Max*100);
+  const pity4pct=Math.min(100,a.current4Pity/a.pity4Max*100);
+
+  let guHtml='';
+  if (a.hasUP5) {
+    if (a.up5Type === 'weapon-guaranteed') guHtml='<div class="pity-status no-up">武器活动池 — 5星必出UP武器</div>';
+    else if (a.up5Type === 'weapon-guaranteed-collab') guHtml='<div class="pity-status no-up">武器联动池 — 5星必出UP武器</div>';
+    else if (a.up5Type === 'weapon-selected') guHtml='<div class="pity-status no-up">5星必为自选武器</div>';
+    else if (a.up5Type === 'character-selected') guHtml='<div class="pity-status no-up">5星必为自选角色</div>';
+    else if (a.up5Type === 'character') guHtml=a.guaranteeState5==='big'?'<div class="pity-status big">大保底 — 下次5星必出UP角色</div>':'<div class="pity-status small">小保底 — 50%概率出UP角色</div>';
+    else if (a.up5Type === 'character-collab') guHtml=a.guaranteeState5==='big'?'<div class="pity-status big">联动大保底 — 下次5星必出UP角色</div>':'<div class="pity-status small">联动小保底 — 50%概率出UP角色</div>';
+  } else { guHtml='<div class="pity-status no-up">常驻池 — 无UP机制</div>'; }
+
+  let gu4Html='';
+  if (a.hasUP4) {
+    if (a.up4Type === 'character') gu4Html=a.guaranteeState4==='big'?'<div class="pity-status big" style="margin-top:4px">4星大保底 — 下次4星必出UP角色</div>':'<div class="pity-status small" style="margin-top:4px">4星小保底 — 50%概率出UP角色</div>';
+    else if (a.up4Type === 'weapon') gu4Html=a.guaranteeState4==='big'?'<div class="pity-status big" style="margin-top:4px">4星大保底 — 下次4星必出UP武器</div>':'<div class="pity-status small" style="margin-top:4px">4星小保底 — 50%概率出UP武器</div>';
+    else if (a.up4Type === 'character-collab') gu4Html=a.guaranteeState4==='big'?'<div class="pity-status big" style="margin-top:4px">4星大保底 — 下次4星必出UP角色(联动)</div>':'<div class="pity-status small" style="margin-top:4px">4星小保底 — 50%概率出UP角色(联动)</div>';
+    else if (a.up4Type === 'weapon-collab') gu4Html=a.guaranteeState4==='big'?'<div class="pity-status big" style="margin-top:4px">4星大保底 — 下次4星必出UP武器(联动)</div>':'<div class="pity-status small" style="margin-top:4px">4星小保底 — 50%概率出UP武器(联动)</div>';
+  }
+
+  let crossPoolNote='';
+  if (a.crossPoolPity) {
+    if (a.crossPoolPity === 'char-event') crossPoolNote='<div style="font-size:11px;color:var(--colorNeutralForeground3);margin-top:4px">*5星保底计数在所有「角色活动唤取」池间共享继承</div>';
+    else if (a.crossPoolPity === 'weapon-event') crossPoolNote='<div style="font-size:11px;color:var(--colorNeutralForeground3);margin-top:4px">*5星保底计数在所有「武器活动唤取」池间共享继承</div>';
+    else if (a.crossPoolPity === 'char-collab') crossPoolNote='<div style="font-size:11px;color:var(--colorNeutralForeground3);margin-top:4px">*5星保底计数仅在相同联动主题的「角色联动唤取」池间共享</div>';
+    else if (a.crossPoolPity === 'weapon-collab') crossPoolNote='<div style="font-size:11px;color:var(--colorNeutralForeground3);margin-top:4px">*5星保底计数仅在相同联动主题的「武器联动唤取」池间共享</div>';
+  }
+
+  let distH='', lblH='';
+  const mx=Math.max(...Object.values(a.pityDist),1);
+  for (let b=10;b<=a.pity5Max;b+=10) { const c=a.pityDist[b]||0; distH+=`<div class="pity-bar-v" style="height:${c/mx*70}px"><div class="tip">${b-9}-${b}抽:${c}次</div></div>`; }
+  for (let b=10;b<=a.pity5Max;b+=10) lblH+=`<span>${b%20===0?b:''}</span>`;
+
+  // Probability calculations
+  const nextP5 = get5StarPullProb(a.current5Pity, a.pity5Max);
+  const nextP4 = get4StarPullProb(a.current4Pity, a.pity4Max);
+  const cum10 = getCumulativeProb(a.current5Pity, a.pity5Max, 10);
+  // Soft pity start for 80-pull pools = 70; others proportional
+  const softStart5 = a.pity5Max === 80 ? 70 : Math.round(a.pity5Max * 0.8);
+  const softStart4 = 7;
+  const softZone5pct = ((a.pity5Max - softStart5) / a.pity5Max * 100).toFixed(1);
+  const softZone4pct = ((a.pity4Max - softStart4) / a.pity4Max * 100).toFixed(1);
+  const nextP5pct = (nextP5 * 100).toFixed(1);
+  const nextP4pct = (nextP4 * 100).toFixed(1);
+  const cum10pct = (cum10 * 100).toFixed(1);
+  const isSoft5 = a.current5Pity >= softStart5;
+
+  let s5rows='', s4rows='';
+  const r5=[...a.stars5].reverse(), r4=[...a.stars4].reverse();
+  for (let i=0;i<r5.length;i++) {
+    const s=r5[i]; let tag='';
+    if(s.upTag==='up')tag='<span class="tag up">UP</span>';
+    else if(s.upTag==='lost')tag='<span class="tag lost">歪了</span>';
+    else if(s.upTag==='guaranteed')tag='<span class="tag guaranteed">大保底出</span>';
+    else if(s.upTag==='selected')tag='<span class="tag weapon-up">自选</span>';
+    else if(s.upTag==='standard')tag='<span class="tag standard">常驻</span>';
+    const ic=getIconUrl(s.resourceId);
+    s5rows+=`<tr class="star5-row"><td class="td-num">${r5.length-i}</td><td class="td-icon">${ic?`<img src="${ic}" loading="lazy" alt="${s.name}" onerror="this.style.display='none'">`:''}</td><td class="td-name">${s.name}</td><td class="td-type">${s.resourceType}</td><td class="td-pity"><strong>${s.pity}</strong> 抽</td><td class="td-time">${s.time}</td><td class="td-tag">${tag}</td></tr>`;
+  }
+  for (let i=0;i<r4.length;i++) {
+    const s=r4[i], ic=getIconUrl(s.resourceId);
+    s4rows+=`<tr class="star4-row"><td class="td-num">${r4.length-i}</td><td class="td-icon">${ic?`<img src="${ic}" loading="lazy" alt="${s.name}" onerror="this.style.display='none'">`:''}</td><td class="td-name">${s.name}</td><td class="td-type">${s.resourceType}</td><td class="td-pity"><strong>${s.pity}</strong> 抽</td><td class="td-time">${s.time}</td><td class="td-tag-empty"></td></tr>`;
+  }
+
+  el.innerHTML = `
+    <div class="pool-grid">
+      <div class="fcard">
+        <h3>保底进度</h3>
+        <div class="pity-item">
+          <div class="pity-label">
+            <span>5星保底</span>
+            <span style="color:var(--colorGoldText);font-weight:700">${a.current5Pity} / ${a.pity5Max}</span>
+          </div>
+          <div class="pity-bar-track">
+            <div class="pity-soft-zone gold" style="width:${softZone5pct}%"></div>
+            <div class="pity-milestone" style="left:${(softStart5/a.pity5Max*100).toFixed(1)}%"><span class="pity-milestone-label">概率提升</span></div>
+            <div class="pity-fill ${isSoft5?'gold hot':pity5pct>50?'red':'gold'}" style="width:${pity5pct}%"></div>
+          </div>
+          <div class="pity-prob-row">
+            <span class="pity-prob-item ${isSoft5?'hot':''}">下抽出金 <strong>${nextP5pct}%</strong></span>
+            <span class="pity-prob-item">10抽内出金 <strong>${cum10pct}%</strong></span>
+          </div>
+          ${guHtml}
+          ${crossPoolNote}
+        </div>
+         <hr class="fui-divider">
+         <div class="pity-item">
+          <div class="pity-label"><span>4星保底</span><span style="color:var(--colorPurpleText);font-weight:700">${a.current4Pity} / ${a.pity4Max}</span></div>
+          <div class="pity-bar-track">
+            <div class="pity-soft-zone purple" style="width:${softZone4pct}%"></div>
+            <div class="pity-fill purple" style="width:${pity4pct}%"></div>
+          </div>
+          <div class="pity-prob-row">
+            <span class="pity-prob-item ${a.current4Pity>=softStart4?'hot':''}">下抽出4星 <strong>${nextP4pct}%</strong></span>
+          </div>
+          ${gu4Html}
+        </div>
+      </div>
+      <div class="fcard">
+        <h3>统计数据</h3>
+        <div class="stats-grid">
+          <div class="stat-item"><span class="label">总抽数</span><span class="val">${a.total}</span></div>
+          <div class="stat-item"><span class="label">5星数量</span><span class="val" style="color:var(--colorGoldText)">${a.s5Count}</span></div>
+          <div class="stat-item"><span class="label">4星数量</span><span class="val" style="color:var(--colorPurpleText)">${a.s4Count}</span></div>
+          <div class="stat-item"><span class="label">3星数量</span><span class="val">${a.s3Count}</span></div>
+          <div class="stat-item"><span class="label">5星出率</span><span class="val">${p5}%</span></div>
+          <div class="stat-item"><span class="label">4星出率</span><span class="val">${p4}%</span></div>
+          <div class="stat-item"><span class="label">5星平均抽数</span><span class="val">${a.avgPity5?a.avgPity5.toFixed(1):'-'}</span></div>
+          <div class="stat-item"><span class="label">4星平均抽数</span><span class="val">${a.avgPity4?a.avgPity4.toFixed(1):'-'}</span></div>
+          <div class="stat-item"><span class="label">最欧出金</span><span class="val" style="color:var(--colorGreenText)">${a.minPity5?a.minPity5+'抽':'-'}</span></div>
+          <div class="stat-item"><span class="label">最非出金</span><span class="val" style="color:var(--colorRedText)">${a.maxPity5?a.maxPity5+'抽':'-'}</span></div>
+          <div class="stat-item"><span class="label">距5星保底</span><span class="val" style="color:${a.pity5Max-a.current5Pity<=10?'var(--colorRedText)':'var(--colorNeutralForeground1)'}">${a.pity5Max-a.current5Pity}抽</span></div>
+        </div>
+      </div>
+    </div>
+    ${a.s5Count?`<hr class="fui-divider inset"><div class="fcard"><h3>5星保底分布</h3><div class="pity-dist">${distH}</div><div class="pity-labels">${lblH}</div></div>`:''}
+    ${a.s5Count?`<hr class="fui-divider"><div class="history-section"><h3><svg class="fluent-icon" style="color:var(--colorGoldText)" width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path d="M9.1 2.9a1 1 0 0 1 1.8 0l1.93 3.91 4.31.63a1 1 0 0 1 .56 1.7l-3.12 3.05.73 4.3a1 1 0 0 1-1.45 1.05L10 15.51l-3.86 2.03a1 1 0 0 1-1.45-1.05l.74-4.3L2.3 9.14a1 1 0 0 1 .56-1.7l4.31-.63L9.1 2.9Z"/></svg> 5星获取记录（共${a.s5Count}个）</h3><table class="ftable"><colgroup><col><col><col><col><col><col><col></colgroup><thead><tr><th>序号</th><th>角色</th><th>名称</th><th>类型</th><th>保底抽数</th><th>时间</th><th>标签</th></tr></thead><tbody>${s5rows}</tbody></table></div>`:''}
+    ${a.s4Count?`<hr class="fui-divider"><div class="history-section"><h3><svg class="fluent-icon" style="color:var(--colorPurpleText)" width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path d="M9.1 2.9a1 1 0 0 1 1.8 0l1.93 3.91 4.31.63a1 1 0 0 1 .56 1.7l-3.12 3.05.73 4.3a1 1 0 0 1-1.45 1.05L10 15.51l-3.86 2.03a1 1 0 0 1-1.45-1.05l.74-4.3L2.3 9.14a1 1 0 0 1 .56-1.7l4.31-.63L9.1 2.9Z"/></svg> 4星获取记录（共${a.s4Count}个）</h3><table class="ftable"><colgroup><col><col><col><col><col><col><col></colgroup><thead><tr><th>序号</th><th>角色</th><th>名称</th><th>类型</th><th>保底抽数</th><th>时间</th><th></th></tr></thead><tbody>${s4rows}</tbody></table></div>`:''}
+    <hr class="fui-divider">
+    ${renderRecordSection(pid, a)}
+  `;
+}
+
+let allAnalysis={}, currentPool=null;
+let recordViewMode = 'grid'; // 'grid' | 'timeline'
+
+function renderRecordSection(pid, a) {
+  if (!a || !a.total) return '';
+  const cfg = POOL_CONFIG[pid] || { pity5: 80 };
+  const nd = normalizeData(RAW_DATA);
+  const records = (nd[pid] || []).slice().reverse(); // 时间升序
+
+  // 预计算每条记录的pity和upTag（复用analyzePool结果）
+  const s5Map = new Map();
+  a.stars5.forEach(s => s5Map.set(s.time + '_' + s.resourceId, s));
+  const s4Map = new Map();
+  a.stars4.forEach(s => s4Map.set(s.time + '_' + s.resourceId, s));
+
+  let curPity5 = 0;
+  const enriched = records.map((r, i) => {
+    curPity5++;
+    let upTag = '', pity = 0;
+    if (r.qualityLevel === 5) {
+      const m = s5Map.get(r.time + '_' + r.resourceId);
+      if (m) { upTag = m.upTag; pity = m.pity; }
+      else { pity = curPity5; }
+      curPity5 = 0;
+    } else if (r.qualityLevel === 4) {
+      const m = s4Map.get(r.time + '_' + r.resourceId);
+      if (m) { pity = m.pity; }
+    }
+    return { ...r, idx: i + 1, upTag, pity, pityCount: curPity5 };
+  });
+
+  // 显示用时间倒序（最新在前），保底计算已基于时间升序完成
+  const displayRecords = enriched.slice().reverse();
+
+  // ── 宫格排列 ──
+  let gridHtml = '<div class="grid-records">';
+  for (const r of displayRecords) {
+    const ic = getIconUrl(r.resourceId);
+    const star = r.qualityLevel === 5 ? 'star5' : r.qualityLevel === 4 ? 'star4' : '';
+    let tagHtml = '';
+    if (r.upTag === 'up') tagHtml = '<span class="card-tag up">UP</span>';
+    else if (r.upTag === 'lost') tagHtml = '<span class="card-tag lost">歪</span>';
+    else if (r.upTag === 'guaranteed') tagHtml = '<span class="card-tag guaranteed">大</span>';
+    // 所有卡片都显示保底抽数badge
+    const badge = `<span class="card-badge">${r.qualityLevel === 5 ? r.pity : r.pityCount}</span>`;
+    const starLabel = r.qualityLevel + '★';
+    gridHtml += `<div class="grid-card ${star}" data-time="${r.time}" data-name="${r.name}" data-star="${starLabel}" data-type="${r.resourceType}">
+      <div class="card-inner">
+        ${badge}${tagHtml}
+        ${ic ? `<img class="card-icon" src="${ic}" loading="lazy" alt="${r.name}" onerror="this.style.display='none'">` : '<div class="card-icon" style="background:var(--colorNeutralBackground3);border-radius:50%"></div>'}
+        <span class="card-name">${r.name}</span>
+      </div>
+    </div>`;
+  }
+  gridHtml += '</div>';
+
+  // ── 横向排列（保底进度条 + 5星图标，参考 mc.appfeng.com）──
+  // 只展示5星保底进度可视化，不展示3/4星卡片
+  let tlHtml = '';
+  tlHtml += '<div class="tl-pity-timeline">';
+
+  // 当前垫抽进度（顶部，无5星图标）
+  if (a.current5Pity > 0) {
+    const pct = Math.min(100, a.current5Pity / cfg.pity5 * 100);
+    tlHtml += `<div class="tl-row">
+      <div class="tl-bar-track">
+        <div class="tl-bar-fill current" style="width:${pct}%"></div>
+        <span class="tl-bar-text">已垫 ${a.current5Pity} 抽</span>
+      </div>
+      <div class="tl-bar-end"></div>
+    </div>`;
+  }
+
+  // 按5星分组（倒序，最新5星在最上面）
+  const s5list = a.stars5 ? [...a.stars5].reverse() : [];
+  for (const s of s5list) {
+    const pct = Math.min(100, s.pity / cfg.pity5 * 100);
+    const ic = getIconUrl(s.resourceId);
+    // 进度条颜色类型：UP=green, lost=orange, guaranteed=green-stripe, standard=neutral
+    let barCls = 'up';
+    let tagLabel = '';
+    if (s.upTag === 'lost') { barCls = 'lost'; tagLabel = '<span class="tl-tag lost">歪</span>'; }
+    else if (s.upTag === 'guaranteed') { barCls = 'guaranteed'; tagLabel = '<span class="tl-tag guaranteed">大保底</span>'; }
+    else if (s.upTag === 'up') { tagLabel = '<span class="tl-tag up">UP</span>'; }
+    else if (s.upTag === 'selected') { barCls = 'up'; tagLabel = '<span class="tl-tag up">自选</span>'; }
+    else if (s.upTag === 'standard') { barCls = 'standard'; }
+
+    tlHtml += `<div class="tl-row">
+      <div class="tl-bar-track">
+        <div class="tl-bar-fill ${barCls}" style="width:${pct}%"></div>
+      </div>
+      <div class="tl-bar-end">
+        ${ic ? `<img class="tl-s5-icon" src="${ic}" loading="lazy" alt="${s.name}" onerror="this.style.display='none'">` : '<div class="tl-s5-icon placeholder"></div>'}
+        <div class="tl-s5-info">
+          <span class="tl-s5-name">${s.name}</span>
+          <span class="tl-s5-pity">${s.pity}抽</span>
+          ${tagLabel}
+        </div>
+      </div>
+    </div>`;
+  }
+  tlHtml += '</div>';
+
+  // 视图切换控件
+  const toggleHtml = `
+  <div class="fcard">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">抽卡记录</h3>
+      <div class="record-view-toggle">
+        <button class="toggle-btn ${recordViewMode==='grid'?'active':''}" onclick="switchRecordView('grid','${pid}')">
+          <svg viewBox="0 0 20 20" fill="currentColor"><path d="M7 2H3a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V3a1 1 0 00-1-1zM7 12H3a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1v-4a1 1 0 00-1-1zM17 2h-4a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V3a1 1 0 00-1-1zM17 12h-4a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1v-4a1 1 0 00-1-1z"/></svg>
+          宫格
+        </button>
+        <button class="toggle-btn ${recordViewMode==='timeline'?'active':''}" onclick="switchRecordView('timeline','${pid}')">
+          <svg viewBox="0 0 20 20" fill="currentColor"><path d="M2.5 4a.5.5 0 000 1h15a.5.5 0 000-1h-15zM2.5 9a.5.5 0 000 1h15a.5.5 0 000-1h-15zM2.5 14a.5.5 0 000 1h15a.5.5 0 000-1h-15z"/></svg>
+          横向
+        </button>
+      </div>
+      <span style="font-size:12px;color:var(--colorNeutralForeground3)">${enriched.length} 条记录</span>
+    </div>
+    <div id="record-body-${pid}">
+      ${recordViewMode === 'grid' ? gridHtml : tlHtml}
+    </div>
+  </div>`;
+
+  return toggleHtml;
+}
+
+function switchRecordView(mode, pid) {
+  recordViewMode = mode;
+  renderPoolContent(pid, allAnalysis[pid]);
+}
+
+// ── Fluent UI 2 Tooltip + 同时间高亮（聚焦模式）──
+let gachaTooltip = null;
+let currentHoveredCard = null;
+let gridFocusTimeout = null;
+
+function initTooltip() {
+  if (gachaTooltip) return;
+  gachaTooltip = document.createElement('div');
+  gachaTooltip.className = 'gacha-tooltip';
+  gachaTooltip.style.pointerEvents = 'none';
+  document.body.appendChild(gachaTooltip);
+
+  // ── 聚焦模式：用 pointerenter/pointerleave 在 .grid-records 上 ──
+  // 使用事件委托，检测鼠标是否进入了宫格区域
+  document.addEventListener('pointerover', e => {
+    const grid = e.target.closest ? e.target.closest('.grid-records') : null;
+    if (grid) {
+      clearTimeout(gridFocusTimeout);
+      grid.classList.add('in-focus');
+    }
+  });
+
+  document.addEventListener('pointerout', e => {
+    const grid = e.target.closest ? e.target.closest('.grid-records') : null;
+    if (!grid) return;
+    // 检查 relatedTarget 是否还在 grid 内
+    const related = e.relatedTarget;
+    if (related) {
+      const stillInGrid = related.closest ? related.closest('.grid-records') : null;
+      if (stillInGrid === grid) return; // 还在grid内，不取消聚焦
+    }
+    // 真正离开了grid，延迟100ms取消（避免鼠标快速经过间隙）
+    clearTimeout(gridFocusTimeout);
+    gridFocusTimeout = setTimeout(() => {
+      grid.classList.remove('in-focus');
+      clearSameTimeHighlight(grid);
+      hideTooltip();
+      currentHoveredCard = null;
+    }, 100);
+  });
+
+  // ── 滚动时隐藏tooltip，避免脱离卡片 ──
+  document.addEventListener('scroll', () => {
+    if (gachaTooltip && gachaTooltip.classList.contains('visible')) {
+      hideTooltip();
+      currentHoveredCard = null;
+    }
+  }, true);
+
+  // ── hover卡片 → 高亮同时间 + tooltip ──
+  document.addEventListener('pointerover', e => {
+    const card = e.target.closest ? e.target.closest('.grid-card') : null;
+    if (!card || !card.dataset.time) {
+      if (currentHoveredCard) {
+        // 鼠标从卡片移到宫格内非卡片区域，取消高亮但保留聚焦
+        clearSameTimeHighlight();
+        hideTooltip();
+        currentHoveredCard = null;
+      }
+      return;
+    }
+    if (card === currentHoveredCard) return;
+    currentHoveredCard = card;
+    clearSameTimeHighlight();
+    highlightSameTime(card.dataset.time);
+    hideTooltip();
+    showCardTooltip(card, e);
+  });
+}
+
+function highlightSameTime(time) {
+  document.querySelectorAll('.grid-records').forEach(container => {
+    container.querySelectorAll('.grid-card').forEach(card => {
+      if (card.dataset.time === time) {
+        card.classList.add('same-time-highlight');
+      }
+    });
+  });
+}
+
+function clearSameTimeHighlight(scope) {
+  const roots = scope ? [scope] : document.querySelectorAll('.grid-records');
+  roots.forEach(c => c.querySelectorAll('.same-time-highlight').forEach(card => card.classList.remove('same-time-highlight')));
+}
+
+function showCardTooltip(card, event) {
+  if (!gachaTooltip) return;
+  const name = card.dataset.name || '';
+  const star = card.dataset.star || '';
+  const rtype = card.dataset.type || '';
+  const time = card.dataset.time || '';
+  const starCls = star === '5★' ? 'tt-star5' : star === '4★' ? 'tt-star4' : '';
+
+  gachaTooltip.innerHTML = `<div class="${starCls}">
+    <div class="tt-name">${name}</div>
+    <div class="tt-meta">${star} ${rtype}</div>
+    <div class="tt-meta">${time}</div>
+  </div>`;
+
+  // 定位
+  const rect = card.getBoundingClientRect();
+  let left = rect.left + rect.width / 2;
+  let top = rect.top - 8;
+  gachaTooltip.style.left = left + 'px';
+  gachaTooltip.style.top = top + 'px';
+  gachaTooltip.style.transform = 'translate(-50%, -100%) translateY(4px)';
+
+  // 先显示获取尺寸
+  gachaTooltip.classList.add('visible');
+  requestAnimationFrame(() => {
+    gachaTooltip.style.transform = 'translate(-50%, -100%)';
+  });
+
+  // 边界检测
+  const ttRect = gachaTooltip.getBoundingClientRect();
+  if (ttRect.top < 4) {
+    top = rect.bottom + 8;
+    gachaTooltip.style.top = top + 'px';
+    gachaTooltip.style.transform = 'translate(-50%, 0)';
+  }
+  if (ttRect.left < 4) {
+    gachaTooltip.style.left = (4 + ttRect.width / 2) + 'px';
+  }
+  const vpWidth = window.innerWidth;
+  if (ttRect.right > vpWidth - 4) {
+    gachaTooltip.style.left = (vpWidth - 4 - ttRect.width / 2) + 'px';
+  }
+}
+
+function hideTooltip() {
+  if (gachaTooltip) gachaTooltip.classList.remove('visible');
+}
+
+
+
+
+function switchPool(pid) {
+  clearSameTimeHighlight();
+  hideTooltip();
+  document.querySelectorAll('.pool-tab').forEach(t=>t.classList.toggle('active',t.dataset.pool===pid));
+  currentPool=pid; renderPoolContent(pid,allAnalysis[pid]);
+}
+
+function renderAll() {
+  const data=normalizeData(RAW_DATA);
+  allAnalysis={};
+  for (const pid of Object.keys(POOL_CONFIG)) {
+    const r=data[pid]||[];
+    allAnalysis[pid]=r.length?analyzePool(r,pid):null;
+  }
+  renderOverview(allAnalysis);
+  renderPoolTabs(allAnalysis);
+  const first=document.querySelector('.pool-tab');
+  if (first) switchPool(first.dataset.pool);
+
+  // Update header meta
+  const uid = RAW_DATA.uid || '-';
+  const now = new Date().toISOString().slice(0,10);
+  document.getElementById('header-meta').textContent = `UID: ${uid} | 数据截至: ${now}`;
+}
+
+function loadAndRender() {
+  fetch('/api/data')
+    .then(r => r.json())
+    .then(resp => {
+      if (resp.ok) {
+        RAW_DATA = resp.data;
+        ICON_MAP = resp.icons || {};
+        renderAll();
+      }
+    });
+}
+
+// Init: load data from server
+loadAndRender();
+initTooltip();
+</script>
+<div class="toast-container" id="toast-container"></div>
+</body>
+</html>"""
+
+# ============================================================
+# Flask App
+# ============================================================
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    """上传页"""
+    return render_template_string(UPLOAD_PAGE)
+
+@app.route('/analysis')
+def analysis():
+    """分析页"""
+    return render_template_string(ANALYSIS_PAGE)
+
+@app.route('/icons/<path:filename>')
+def serve_icon(filename):
+    """图标文件服务（支持 png/webp）"""
+    response = send_from_directory(os.path.join(DATA_DIR, 'icons'), filename)
+    if filename.endswith('.webp'):
+        response.headers['Content-Type'] = 'image/webp'
+    return response
+
+@app.route('/api/data')
+def api_data():
+    """返回当前数据和图标映射"""
+    global current_data, current_icon_map
+    if current_data is None:
+        return jsonify({"ok": False, "error": "暂无数据，请先上传抽卡记录"})
+    return jsonify({
+        "ok": True,
+        "data": current_data,
+        "icons": current_icon_map,
+        "total": count_records(current_data)
+    })
+
+@app.route('/api/upload', methods=['POST'])
+def api_upload():
+    """上传抽卡记录JSON"""
+    global current_data, current_icon_map
+
+    if 'file' not in request.files:
+        return jsonify({"ok": False, "error": "未找到文件"})
+
+    f = request.files['file']
+    if not f.filename.endswith('.json'):
+        return jsonify({"ok": False, "error": "仅支持 .json 文件"})
+
+    try:
+        raw = json.load(f.stream)
+    except json.JSONDecodeError:
+        return jsonify({"ok": False, "error": "JSON 格式错误"})
+
+    # 验证数据结构：至少有一个池键
+    has_pool = any(isinstance(v, list) and len(v) > 0 for k, v in raw.items() if k != 'uid')
+    if not has_pool:
+        return jsonify({"ok": False, "error": "未找到有效的抽卡记录数据"})
+
+    # 保存文件
+    uid = raw.get("uid", "unknown")
+    now = datetime.datetime.now()
+    filename = f"uid_{uid}_{now.strftime('%Y-%m-%d_%H%M%S')}.json"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    with open(filepath, "w", encoding="utf-8") as out:
+        json.dump(raw, out, ensure_ascii=False)
+
+    # 更新数据（确保每个池子按时间严格倒序）
+    for k, v in raw.items():
+        if k == "uid" or not isinstance(v, list):
+            continue
+        # 修复已知的时间戳异常（如 "2024s-" → "2024-"）
+        for r in v:
+            t = r.get("time", "")
+            if "2024s-" in t:
+                r["time"] = t.replace("2024s-", "2024-")
+        raw[k] = _stable_sort_desc(v)
+    current_data = raw
+    current_icon_map = cache_icons(raw)
+
+    total = count_records(raw)
+    print(f"  上传成功: {filename} ({total}条记录)")
+    return jsonify({"ok": True, "total": total, "uid": uid})
+
+@app.route('/api/merge', methods=['POST'])
+def api_merge():
+    """合并历史抽卡记录"""
+    global current_data, current_icon_map
+
+    if current_data is None:
+        return jsonify({"ok": False, "error": "请先上传主抽卡记录"})
+
+    if 'file' not in request.files:
+        return jsonify({"ok": False, "error": "未找到文件"})
+
+    f = request.files['file']
+    if not f.filename.endswith('.json'):
+        return jsonify({"ok": False, "error": "仅支持 .json 文件"})
+
+    try:
+        history = json.load(f.stream)
+    except json.JSONDecodeError:
+        return jsonify({"ok": False, "error": "JSON 格式错误"})
+
+    has_pool = any(isinstance(v, list) and len(v) > 0 for k, v in history.items() if k != 'uid')
+    if not has_pool:
+        return jsonify({"ok": False, "error": "未找到有效的抽卡记录数据"})
+
+    old_total = count_records(current_data)
+
+    # 保留上传文件
+    uid = history.get("uid", "unknown")
+    now = datetime.datetime.now()
+    filename = f"uid_{uid}_{now.strftime('%Y-%m-%d_%H%M%S')}_history.json"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    with open(filepath, "w", encoding="utf-8") as out:
+        json.dump(history, out, ensure_ascii=False)
+
+    # 执行合并：当前数据为主，历史数据为辅助
+    merged = merge_data(current_data, history)
+
+    # 保存合并结果
+    merged_filename = f"uid_{uid}_{now.strftime('%Y-%m-%d_%H%M%S')}_merged.json"
+    merged_filepath = os.path.join(UPLOAD_DIR, merged_filename)
+    with open(merged_filepath, "w", encoding="utf-8") as out:
+        json.dump(merged, out, ensure_ascii=False)
+
+    # 更新内存数据
+    current_data = merged
+    current_icon_map = cache_icons(merged)
+
+    new_total = count_records(merged)
+    history_total = count_records(history)
+    print(f"  合并完成: 原{old_total}条 + 历史{history_total}条 = 合并后{new_total}条")
+
+    return jsonify({
+        "ok": True,
+        "total": new_total,
+        "old_total": old_total,
+        "history_total": history_total,
+        "uid": uid
+    })
+
+@app.route('/api/download')
+def api_download():
+    """下载当前合并后的抽卡记录JSON"""
+    if current_data is None:
+        return jsonify({"ok": False, "error": "暂无数据"}), 404
+    uid = current_data.get("uid", "unknown")
+    now = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    filename = f"uid_{uid}_{now}_merged.json"
+    resp = jsonify(current_data)
+    resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    resp.headers["Content-Type"] = "application/json; charset=utf-8"
+    return resp
+
+# ============================================================
+# Main
+# ============================================================
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='鸣潮抽卡分析 - 本地Web服务')
+    parser.add_argument('--port', type=int, default=8766, help='服务端口 (默认8766)')
+    parser.add_argument('--debug', action='store_true', help='调试模式')
+    args = parser.parse_args()
+
+    print("=" * 50)
+    print("  鸣潮抽卡分析 - 本地Web服务")
+    print("=" * 50)
+    print(f"  访问地址: http://localhost:{args.port}")
+    print(f"  数据目录: {DATA_DIR}")
+    print(f"  上传目录: {UPLOAD_DIR}")
+    print("=" * 50)
+
+    # 启动时预加载 encore.moe 备用图标映射
+    load_encore_mapping()
+
+    app.run(host='127.0.0.1', port=args.port, debug=args.debug)
