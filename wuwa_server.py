@@ -881,32 +881,43 @@ svg.fluent-icon { vertical-align: middle; flex-shrink: 0; }
 
 /* Pool Tabs */
 /* Fluent UI 2 TabList: Horizontal */
+/* ── Fluent UI 2 TabList Horizontal ── */
 .pool-tabs {
-  display: flex; gap: 0; margin: 12px 0 0; padding-bottom: 0;
+  display: flex; flex-direction: row; gap: 0;
+  margin: 12px 0 0; padding: 0; height: 44px;
   position: relative; overflow-x: auto; overflow-y: hidden;
   scrollbar-width: thin;
-}
-.pool-tabs::after {
-  content: ''; position: absolute; bottom: 0; left: 0; right: 0;
-  height: 1px; background: var(--colorNeutralStroke2);
 }
 .pool-tabs::-webkit-scrollbar { height: 2px; }
 .pool-tabs::-webkit-scrollbar-thumb { background: var(--colorNeutralStroke3); border-radius: 1px; }
 .pool-tab {
-  position: relative; padding: 12px 10px; background: transparent; border: none;
-  cursor: pointer; font-size: 13px; color: var(--colorNeutralForeground2);
-  transition: color 0.15s ease, background 0.15s ease; white-space: nowrap;
-  font-weight: 400; flex-shrink: 0; z-index: 1;
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  padding: 12px 10px; height: 44px; background: transparent; border: none;
+  cursor: pointer; font-size: 13px; font-weight: 400;
+  color: var(--colorNeutralForeground2);
+  border-radius: 4px; white-space: nowrap; flex-shrink: 0; z-index: 1;
+  transition: color 0.15s ease, background 0.15s ease;
 }
+.pool-tab:hover {
+  color: var(--colorNeutralForeground1Hover);
+  background: var(--colorSubtleBackgroundHover);
+}
+.pool-tab:focus-visible {
+  outline: 2px solid var(--colorCompoundBrandStroke); outline-offset: -2px; border-radius: 4px;
+}
+.pool-tab.active {
+  color: var(--colorNeutralForeground1); font-weight: 400; background: transparent;
+}
+/* 选中指示条：::after 伪元素，3px 高，pill 圆角，brand 色 */
 .pool-tab::after {
-  content: ''; position: absolute; bottom: 0; left: 0; right: 0;
-  height: 3px; background: transparent;
-  transition: background 0.2s cubic-bezier(0.4,0,0.2,1);
+  content: ''; display: block; position: absolute; bottom: 0;
+  left: 10px; right: 10px; height: 3px; border-radius: 10000px;
+  background: transparent;
+  transition: background 0.3s cubic-bezier(0.1, 0.9, 0.2, 1);
 }
-.pool-tab:hover { color: var(--colorNeutralForeground1); background: var(--colorSubtleBackgroundHover); }
-.pool-tab:focus-visible { outline: 2px solid var(--colorCompoundBrandStroke); outline-offset: -2px; border-radius: 4px; }
-.pool-tab.active { color: var(--colorCompoundBrandForeground); font-weight: 600; background: transparent; }
-.pool-tab.active::after { background: var(--colorCompoundBrandStroke); }
+.pool-tab.active::after {
+  background: var(--colorCompoundBrandStroke);
+}
 .pool-tab .count {
   display: inline-block; background: var(--colorNeutralBackground4);
   padding: 1px 7px 2px; border-radius: 10px; font-size: 11px;
