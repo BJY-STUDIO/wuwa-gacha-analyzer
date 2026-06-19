@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 鸣潮抽卡分析 — 本地Web服务
@@ -16,7 +16,8 @@
   python wuwa_server.py --port 9000  # 指定端口
 """
 
-import json, os, sys, datetime, urllib.request, argparse
+import json, os, sys, datetime, urllib.request, argparse, time
+import requests as req_lib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, jsonify, send_from_directory, render_template_string
 
@@ -360,7 +361,6 @@ UPLOAD_PAGE = """<!DOCTYPE html>
   --colorNeutralBackground1: #ffffff;
   --colorNeutralBackground2: #fafafa;
   --colorNeutralBackground3: #f5f5f5;
-  --colorNeutralBackground4: #f0f0f0;
   --colorSubtleBackground: #fafafa;
   --colorSubtleBackgroundHover: #f0f0f0;
   --colorNeutralForeground1: #141414;
@@ -369,12 +369,9 @@ UPLOAD_PAGE = """<!DOCTYPE html>
   --colorNeutralStroke1: #d1d1d1;
   --colorNeutralStroke2: #e0e0e0;
   --colorNeutralStrokeAccessible: #616161;
-  --colorNeutralStrokeAccessibleHover: #575757;
-  --colorNeutralStrokeAccessiblePressed: #4d4d4d;
   --colorBrandBackground: #0078d4;
   --colorBrandBackgroundHover: #106ebe;
   --colorBrandBackgroundPressed: #005a9e;
-  --colorBrandBackground2: #deecf9;
   --colorBrandForeground1: #0078d4;
   --colorCompoundBrandBackground: #0f6cbd;
   --colorCompoundBrandBackgroundHover: #115ea3;
@@ -383,14 +380,11 @@ UPLOAD_PAGE = """<!DOCTYPE html>
   --colorCompoundBrandForeground: #0078d4;
   --colorNeutralForegroundInverted: #ffffff;
   --shadow4: 0 2px 4px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.08);
-  --colorGreenText: #0b6a0b;
-  --colorRedText: #a4262c;
 }
 [data-theme="dark"] {
   --colorNeutralBackground1: #292929;
   --colorNeutralBackground2: #1f1f1f;
   --colorNeutralBackground3: #1a1a1a;
-  --colorNeutralBackground4: #161616;
   --colorSubtleBackground: #1f1f1f;
   --colorSubtleBackgroundHover: #292929;
   --colorNeutralForeground1: #f8f8f8;
@@ -399,12 +393,9 @@ UPLOAD_PAGE = """<!DOCTYPE html>
   --colorNeutralStroke1: #4a4a4a;
   --colorNeutralStroke2: #3d3d3d;
   --colorNeutralStrokeAccessible: #adadad;
-  --colorNeutralStrokeAccessibleHover: #bdbdbd;
-  --colorNeutralStrokeAccessiblePressed: #b3b3b3;
   --colorBrandBackground: #0078d4;
   --colorBrandBackgroundHover: #106ebe;
   --colorBrandBackgroundPressed: #005a9e;
-  --colorBrandBackground2: #083147;
   --colorBrandForeground1: #62abf5;
   --colorCompoundBrandBackground: #479ef5;
   --colorCompoundBrandBackgroundHover: #62abf5;
@@ -413,129 +404,175 @@ UPLOAD_PAGE = """<!DOCTYPE html>
   --colorCompoundBrandForeground: #62abf5;
   --colorNeutralForegroundInverted: #242424;
   --shadow4: 0 2px 4px rgba(0,0,0,0.22), 0 4px 12px rgba(0,0,0,0.24);
-  --colorGreenText: #6ccb5f;
-  --colorRedText: #f1707b;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
   font-family: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei', sans-serif;
   background: var(--colorNeutralBackground3);
   color: var(--colorNeutralForeground1);
-  min-height: 100vh;
-  display: flex; align-items: center; justify-content: center;
+  line-height: 1.5; min-height: 100vh;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+.container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+
+/* --- Header (与分析页统一) --- */
+.header {
+  background: var(--colorNeutralBackground1);
+  border-bottom: 1px solid var(--colorNeutralStroke2);
+  padding: 12px 0;
+  position: sticky; top: 0; z-index: 100;
+  backdrop-filter: blur(20px);
   transition: background 0.3s ease;
 }
-
-/* --- Theme Switch --- */
-.theme-switch {
-  position: fixed; top: 20px; right: 24px;
-  display: flex; align-items: center; gap: 8px;
-  color: var(--colorNeutralForeground2); font-size: 16px; line-height: 1;
-  z-index: 10;
-}
-.theme-icon { transition: opacity 0.2s ease; display: flex; align-items: center; }
+.header-inner { display: flex; justify-content: space-between; align-items: center; }
+.header h1 { font-size: 22px; font-weight: 600; color: var(--colorBrandForeground1); }
+.header .meta { color: var(--colorNeutralForeground2); font-size: 13px; margin-top: 2px; }
+.theme-switch { display: flex; align-items: center; gap: 8px; color: var(--colorNeutralForeground2); font-size: 14px; }
 .theme-toggle {
   position: relative; width: 40px; height: 20px;
-  background: transparent;
-  border-radius: 10px; cursor: pointer;
+  background: transparent; border-radius: 10px; cursor: pointer;
   border: 1px solid var(--colorNeutralStrokeAccessible);
   transition: all 0.2s ease; flex-shrink: 0; outline: none;
 }
 .theme-toggle::after {
   content: ''; position: absolute; top: 2px; left: 2px;
-  width: 14px; height: 14px;
-  background: var(--colorNeutralStrokeAccessible);
+  width: 14px; height: 14px; background: var(--colorNeutralStrokeAccessible);
   border-radius: 50%; transition: all 0.2s ease;
 }
 .theme-toggle:focus-visible { box-shadow: 0 0 0 2px var(--colorCompoundBrandStroke); }
-.theme-toggle:hover { border-color: var(--colorNeutralStrokeAccessibleHover); }
-.theme-toggle:hover::after { background: var(--colorNeutralStrokeAccessibleHover); }
-.theme-toggle:active { border-color: var(--colorNeutralStrokeAccessiblePressed); }
-.theme-toggle:active::after { background: var(--colorNeutralStrokeAccessiblePressed); }
-.theme-toggle.active {
-  background: var(--colorCompoundBrandBackground);
-  border-color: transparent;
-}
+.theme-toggle:hover { border-color: var(--colorNeutralStrokeAccessible); }
+.theme-toggle:hover::after { background: var(--colorNeutralStrokeAccessible); }
+.theme-toggle.active { background: var(--colorCompoundBrandBackground); border-color: transparent; }
 .theme-toggle.active::after { left: 22px; background: var(--colorNeutralForegroundInverted); }
-.theme-toggle.active:hover {
-  background: var(--colorCompoundBrandBackgroundHover);
-}
-.theme-toggle.active:active {
-  background: var(--colorCompoundBrandBackgroundPressed);
-}
+.theme-toggle.active:hover { background: var(--colorCompoundBrandBackgroundHover); }
+.theme-icon { line-height: 1; display: flex; align-items: center; transition: opacity 0.2s; }
 
-/* --- Hero Section --- */
-.hero { text-align: center; margin-bottom: 32px; }
-.hero-icon {
-  width: 64px; height: 64px; margin: 0 auto 16px;
-  background: var(--colorNeutralBackground4);
-  border-radius: 16px;
+/* --- Breadcrumb (Fluent UI 2 实测) --- */
+.f2-breadcrumb {
+  display: flex; align-items: center; gap: 0;
+  font-size: 14px; line-height: 20px; font-weight: 400;
+  margin-bottom: 4px;
+}
+.f2-breadcrumb__item {
   display: flex; align-items: center; justify-content: center;
-  color: var(--colorBrandForeground1);
-  transition: background 0.3s;
+  padding: 6px; height: 32px;
+  color: var(--colorNeutralForeground2);
+  text-decoration: none; cursor: pointer;
+  border-radius: 4px; border: none; background: transparent;
+  transition: background 0.1s, color 0.1s;
 }
-.hero h1 {
-  font-size: 28px; font-weight: 700;
-  color: var(--colorNeutralForeground1);
-  margin-bottom: 8px; letter-spacing: -0.02em;
-}
-.hero .desc {
-  font-size: 14px; color: var(--colorNeutralForeground2);
-  line-height: 1.6; max-width: 360px; margin: 0 auto;
-}
+.f2-breadcrumb__item:hover { color: var(--colorNeutralForeground1); background: var(--colorSubtleBackgroundHover); text-decoration: none; }
+.f2-breadcrumb__item--current { color: var(--colorNeutralForeground2); cursor: default; pointer-events: none; }
+.f2-breadcrumb__item--current:hover { color: var(--colorNeutralForeground2); background: transparent; }
+.f2-breadcrumb__sep { color: var(--colorNeutralForeground1); display: flex; align-items: center; font-size: 16px; padding: 0; margin: 0; }
 
-/* --- Upload Card --- */
-.upload-card {
+/* --- 双卡片布局 --- */
+.cards-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 16px; margin-top: 24px;
+}
+@media (max-width: 768px) {
+  .cards-grid { grid-template-columns: 1fr; }
+}
+.input-card {
   background: var(--colorNeutralBackground1);
   border: 1px solid var(--colorNeutralStroke2);
-  border-radius: 12px;
-  padding: 40px 48px;
-  box-shadow: var(--shadow4);
-  max-width: 480px; width: 90%;
-  transition: background 0.3s, border-color 0.3s, box-shadow 0.3s;
+  border-radius: 8px;
+  padding: 24px;
+  transition: background 0.3s, border-color 0.3s;
 }
+.input-card__header {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 20px;
+}
+.input-card__icon {
+  width: 40px; height: 40px;
+  background: var(--colorSubtleBackground);
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--colorBrandForeground1); flex-shrink: 0;
+}
+.input-card__title { font-size: 16px; font-weight: 600; color: var(--colorNeutralForeground1); }
+.input-card__desc { font-size: 13px; color: var(--colorNeutralForeground2); margin-top: 2px; }
 
-/* --- Upload Zone (Fluent Drop Zone) --- */
+/* --- Upload Zone (文件上传) --- */
 .upload-zone {
   border: 2px dashed var(--colorNeutralStroke2);
-  border-radius: 8px;
-  padding: 36px 20px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  position: relative;
-  background: var(--colorSubtleBackground);
+  border-radius: 8px; padding: 32px 20px;
+  cursor: pointer; transition: all 0.2s ease;
+  position: relative; background: var(--colorSubtleBackground);
+  text-align: center;
 }
-.upload-zone:hover {
-  border-color: var(--colorCompoundBrandStroke);
-  background: var(--colorSubtleBackgroundHover);
-}
-.upload-zone.dragover {
-  border-color: var(--colorBrandForeground1);
-  background: var(--colorSubtleBackgroundHover);
-  border-style: solid;
-}
-.upload-zone .zone-icon {
-  margin-bottom: 12px;
-  color: var(--colorNeutralForeground3);
-  display: flex; justify-content: center;
-  transition: color 0.2s;
-}
+.upload-zone:hover { border-color: var(--colorCompoundBrandStroke); background: var(--colorSubtleBackgroundHover); }
+.upload-zone.dragover { border-color: var(--colorBrandForeground1); background: var(--colorSubtleBackgroundHover); border-style: solid; }
+.upload-zone .zone-icon { margin-bottom: 12px; color: var(--colorNeutralForeground3); display: flex; justify-content: center; transition: color 0.2s; }
 .upload-zone:hover .zone-icon { color: var(--colorBrandForeground1); }
-.upload-zone .zone-text {
-  font-size: 14px; color: var(--colorNeutralForeground2); line-height: 1.5;
-}
-.upload-zone .zone-text strong {
-  color: var(--colorBrandForeground1); font-weight: 600;
-}
-.upload-zone .zone-hint {
-  font-size: 12px; color: var(--colorNeutralForeground3); margin-top: 8px;
-}
-.upload-zone input[type="file"] {
-  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-  opacity: 0; cursor: pointer;
-}
+.upload-zone .zone-text { font-size: 14px; color: var(--colorNeutralForeground2); line-height: 1.5; }
+.upload-zone .zone-text strong { color: var(--colorBrandForeground1); font-weight: 600; }
+.upload-zone .zone-hint { font-size: 12px; color: var(--colorNeutralForeground3); margin-top: 8px; }
+.upload-zone input[type="file"] { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
 
-/* --- Toast --- */
+/* --- InfoLabel + Textarea + Primary Button --- */
+.f2-infolabel {
+  display: flex; align-items: center; gap: 4px;
+  margin-bottom: 8px; font-size: 14px;
+  font-weight: 600; color: var(--colorNeutralForeground1); line-height: 20px;
+}
+.f2-infolabel__info {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; cursor: pointer;
+  color: var(--colorNeutralForeground3); border-radius: 4px; border: none; background: none;
+  padding: 0; transition: color 0.1s, background 0.1s;
+}
+.f2-infolabel__info:hover { color: var(--colorNeutralForeground2); background: var(--colorSubtleBackgroundHover); }
+.f2-infolabel__popover {
+  display: none; position: absolute; bottom: calc(100% + 8px);
+  left: 50%; transform: translateX(-50%);
+  background: var(--colorNeutralBackground1); border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 8px; box-shadow: var(--shadow4);
+  padding: 12px 16px; font-size: 13px; font-weight: 400;
+  color: var(--colorNeutralForeground2); line-height: 1.5;
+  width: max-content; max-width: 320px; z-index: 100;
+  white-space: normal;
+}
+.f2-infolabel__popover::before {
+  content: ''; position: absolute; bottom: -4px;
+  left: 50%; transform: translateX(-50%) rotate(45deg);
+  width: 8px; height: 8px; background: var(--colorNeutralBackground1);
+  border-right: 1px solid var(--colorNeutralStroke2);
+  border-bottom: 1px solid var(--colorNeutralStroke2);
+}
+.f2-infolabel__info.open .f2-infolabel__popover { display: block; }
+.f2-textarea {
+  width: 100%; resize: vertical; min-height: 88px;
+  padding: 6px 12px; font-family: inherit; font-size: 14px; line-height: 20px;
+  color: var(--colorNeutralForeground1); background: var(--colorNeutralBackground1);
+  border: 1px solid var(--colorNeutralStroke1);
+  border-bottom: 2px solid var(--colorNeutralStrokeAccessible);
+  border-radius: 4px; outline: none; transition: border-color 0.1s;
+}
+.f2-textarea::placeholder { color: var(--colorNeutralForeground3); }
+.f2-textarea:hover { border-bottom-color: var(--colorNeutralStrokeAccessibleHover); }
+.f2-textarea:focus { border-bottom-color: var(--colorCompoundBrandStroke); }
+.f2-textarea:focus-visible { border-bottom-color: var(--colorCompoundBrandStroke); }
+.cred-actions { display: flex; justify-content: flex-start; margin-top: 12px; }
+.f2-btn-primary {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 32px; min-width: 80px; padding: 0 16px;
+  border: none; border-radius: 4px;
+  font-family: inherit; font-size: 14px; font-weight: 600; line-height: 1;
+  cursor: pointer; background: var(--colorBrandBackground); color: #ffffff;
+  transition: background 0.1s, box-shadow 0.1s;
+}
+.f2-btn-primary svg { width: 16px; height: 16px; flex-shrink: 0; }
+.f2-btn-primary span { line-height: 1; }
+.f2-btn-primary:hover { background: var(--colorBrandBackgroundHover); }
+.f2-btn-primary:active { background: var(--colorBrandBackgroundPressed); }
+.f2-btn-primary:focus-visible { box-shadow: 0 0 0 2px var(--colorNeutralBackground1), 0 0 0 4px var(--colorCompoundBrandStroke); outline: none; }
+.f2-btn-primary:disabled { background: var(--colorNeutralBackground2); color: var(--colorNeutralForeground3); cursor: not-allowed; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* --- Toast (与分析页统一) --- */
 .toast-container { position: fixed; bottom: 16px; right: 20px; width: 292px; pointer-events: none; z-index: 9999; }
 .toast {
   pointer-events: all; display: grid; grid-template-columns: auto 1fr auto;
@@ -551,11 +588,7 @@ body {
 .toast__title { font-weight: 600; word-break: break-word; }
 .toast__body { padding-top: 4px; font-weight: 400; font-size: 14px; color: var(--colorNeutralForeground2); word-break: break-word; }
 [data-theme="dark"] .toast__body { color: #c4c4c4; }
-.toast__close {
-  grid-column: 3; display: flex; align-items: flex-start; padding-left: 12px;
-  background: none; border: none; cursor: pointer; color: var(--colorNeutralForeground3);
-  padding: 0; font-size: 16px; line-height: 1;
-}
+.toast__close { grid-column: 3; display: flex; align-items: flex-start; padding-left: 12px; background: none; border: none; cursor: pointer; color: var(--colorNeutralForeground3); padding: 0; font-size: 16px; line-height: 1; }
 .toast__close:hover { color: var(--colorNeutralForeground1); }
 .toast--success .toast__media { color: #0f7b0f; }
 [data-theme="dark"] .toast--success .toast__media { color: #9edcab; }
@@ -568,35 +601,144 @@ body {
 .toast--exit { animation: toast-out 0.2s cubic-bezier(0.4,0,0.2,1) forwards; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes toast-out { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(-4px); } }
+
+/* ===== Breadcrumb bar (below header) ===== */
+.breadcrumb-bar { background: var(--colorNeutralBackground2); border-bottom: 1px solid var(--colorNeutralStroke2); padding: 6px 0; }
+
+/* ===== Carousel — Fluent UI 2 Appearance (inverted) ===== */
+.carousel { border-radius: 8px; overflow: hidden; position: relative; margin-top: 20px; }
+
+/* Top nav bar — overlays on image with semi-transparent dark background */
+.carousel__topnav { position: absolute; top: 0; left: 0; right: 0; z-index: 10; display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: rgba(0,0,0,0.45); backdrop-filter: blur(8px); color: #fff; }
+.carousel__topnav-title { font-size: 14px; font-weight: 600; color: #fff; margin-right: 8px; white-space: nowrap; }
+.carousel__topnav-pager { font-size: 12px; color: rgba(255,255,255,0.7); min-width: 36px; text-align: center; }
+.carousel__topnav-spacer { flex: 1; }
+.carousel__topnav-dots { display: flex; gap: 6px; align-items: center; }
+.carousel__topnav-dot { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,0.5); border: none; cursor: pointer; padding: 0; transition: all 0.3s; }
+.carousel__topnav-dot.active { background: #fff; width: 20px; border-radius: 3px; }
+.carousel__topnav-btn { width: 28px; height: 28px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.1); color: #fff; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: all 0.15s; padding: 0; }
+.carousel__topnav-btn:hover { background: rgba(255,255,255,0.2); border-color: rgba(255,255,255,0.5); }
+
+/* Slider — CSS transition for smooth animation */
+.carousel__viewport { position: relative; width: 100%; overflow: hidden; }
+.carousel__slide { position: absolute; top: 0; left: 0; width: 100%; opacity: 0; transition: opacity 0.5s ease; pointer-events: none; }
+.carousel__slide.active { opacity: 1; pointer-events: auto; z-index: 1; position: relative; }
+
+/* Slide: full-width image + overlay info card */
+.carousel__slide-inner { position: relative; width: 100%; background: var(--colorNeutralBackground3); }
+.carousel__slide-inner img { width: 100%; height: auto; display: block; }
+
+/* Overlay info at bottom-left — compact, no full-width grey band */
+.carousel__overlay { position: absolute; left: 0; right: 0; bottom: 0; padding: 20px 24px 16px; background: linear-gradient(to top, rgba(0,0,0,0.72) 0%, rgba(0,0,0,0.35) 60%, transparent 100%); color: #fff; }
+.carousel__overlay-tag { font-size: 11px; font-weight: 600; color: #62abf5; letter-spacing: 0.5px; margin-bottom: 4px; text-transform: uppercase; }
+.carousel__overlay-title { font-size: 16px; font-weight: 600; line-height: 1.4; margin-bottom: 6px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.carousel__overlay-footer { display: flex; align-items: center; gap: 14px; }
+.carousel__overlay-date { font-size: 12px; color: rgba(255,255,255,0.65); }
+.carousel__overlay-link { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; font-size: 13px; font-weight: 600; color: #fff; background: rgba(255,255,255,0.12); text-decoration: none; border: 1px solid rgba(255,255,255,0.2); backdrop-filter: blur(4px); transition: background 0.15s; }
+.carousel__overlay-link:hover { background: rgba(255,255,255,0.22); }
+.carousel__overlay-link svg { flex-shrink: 0; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .carousel__overlay { padding: 14px 16px 12px; }
+  .carousel__overlay-title { font-size: 14px; }
+  .carousel__topnav-title { display: none; }
+}
+
+@keyframes carousel-loading { from { background-position: -200% 0; } to { background-position: 200% 0; } }
+.carousel--loading .carousel__viewport { background: linear-gradient(90deg, var(--colorNeutralBackground3) 25%, var(--colorNeutralBackground2) 50%, var(--colorNeutralBackground3) 75%); background-size: 200% 100%; animation: carousel-loading 1.5s infinite; min-height: 180px; display: flex; align-items: center; justify-content: center; }
+.carousel--loading .carousel__loading-text { color: var(--colorNeutralForeground3); font-size: 14px; }
 </style>
 </head>
 <body>
 
-<div class="theme-switch">
-  <span class="theme-icon"><svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2c.28 0 .5.22.5.5v1a.5.5 0 0 1-1 0v-1c0-.28.22-.5.5-.5Zm0 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0-1a3 3 0 1 1 0-6 3 3 0 0 1 0 6Zm7.5-2.5a.5.5 0 0 0 0-1h-1a.5.5 0 0 0 0 1h1ZM10 16c.28 0 .5.22.5.5v1a.5.5 0 0 1-1 0v-1c0-.28.22-.5.5-.5Zm-6.5-5.5a.5.5 0 0 0 0-1H2.46a.5.5 0 0 0 0 1H3.5Zm.65-6.35c.2-.2.5-.2.7 0l1 1a.5.5 0 1 1-.7.7l-1-1a.5.5 0 0 1 0-.7Zm.7 11.7a.5.5 0 0 1-.7-.7l1-1a.5.5 0 0 1 .7.7l-1 1Zm11-11.7a.5.5 0 0 0-.7 0l-1 1a.5.5 0 0 0 .7.7l1-1a.5.5 0 0 0 0-.7Zm-.7 11.7a.5.5 0 0 0 .7-.7l-1-1a.5.5 0 0 0-.7.7l1 1Z"/></svg></span>
-  <div class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" role="switch" tabindex="0" aria-label="切换深浅主题"></div>
-  <span class="theme-icon"><svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M15.5 13.5A6.98 6.98 0 0 1 4 14.39c2.83-1.09 4.56-2.42 5.6-4.4 1.04-2 1.33-4.16.75-6.9A6.98 6.98 0 0 1 15.5 13.5ZM5.45 16.92A7.98 7.98 0 1 0 9.88 2.04a.6.6 0 0 0-.61.73c.69 2.82.43 4.88-.55 6.76-.94 1.78-2.55 3.03-5.55 4.1a.6.6 0 0 0-.3.9 7.95 7.95 0 0 0 2.59 2.39Z"/></svg></span>
+<div class="header">
+  <div class="container header-inner">
+    <div>
+      <h1>鸣潮抽卡分析</h1>
+      <div class="meta">导入抽卡记录，查看详细分析报告</div>
+    </div>
+    <div class="theme-switch">
+      <span class="theme-icon"><svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2c.28 0 .5.22.5.5v1a.5.5 0 0 1-1 0v-1c0-.28.22-.5.5-.5Zm0 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0-1a3 3 0 1 1 0-6 3 3 0 0 1 0 6Zm7.5-2.5a.5.5 0 0 0 0-1h-1a.5.5 0 0 0 0 1h1ZM10 16c.28 0 .5.22.5.5v1a.5.5 0 0 1-1 0v-1c0-.28.22-.5.5-.5Zm-6.5-5.5a.5.5 0 0 0 0-1H2.46a.5.5 0 0 0 0 1H3.5Zm.65-6.35c.2-.2.5-.2.7 0l1 1a.5.5 0 1 1-.7.7l-1-1a.5.5 0 0 1 0-.7Zm.7 11.7a.5.5 0 0 1-.7-.7l1-1a.5.5 0 0 1 .7.7l-1 1Zm11-11.7a.5.5 0 0 0-.7 0l-1 1a.5.5 0 0 0 .7.7l1-1a.5.5 0 0 0 0-.7Zm-.7 11.7a.5.5 0 0 0 .7-.7l-1-1a.5.5 0 0 0-.7.7l1 1Z"/></svg></span>
+      <div class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" role="switch" tabindex="0" aria-label="切换深浅主题"></div>
+      <span class="theme-icon"><svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path d="M15.5 13.5A6.98 6.98 0 0 1 4 14.39c2.83-1.09 4.56-2.42 5.6-4.4 1.04-2 1.33-4.16.75-6.9A6.98 6.98 0 0 1 15.5 13.5ZM5.45 16.92A7.98 7.98 0 1 0 9.88 2.04a.6.6 0 0 0-.61.73c.69 2.82.43 4.88-.55 6.76-.94 1.78-2.55 3.03-5.55 4.1a.6.6 0 0 0-.3.9 7.95 7.95 0 0 0 2.59 2.39Z"/></svg></span>
+    </div>
+  </div>
 </div>
 
-<div class="upload-card">
-  <div class="hero">
-    <div class="hero-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M20 9.54V9.4A7.43 7.43 0 0 0 12.46 2a.48.48 0 0 0-.46.49V9.5c0 .28.22.5.5.5h7.02c.26 0 .48-.2.48-.46Zm-6.5-5.97c2.53.4 4.53 2.4 4.93 4.93H13.5V3.57ZM9 10.5V5.69a6 6 0 1 0 3.01 11.62c-.57.38-.97.98-1.11 1.68l-.4.01A7.5 7.5 0 0 1 10 4.02c.28-.02.5.2.5.48v6a1 1 0 0 0 1 1h6c.28 0 .5.22.48.5a7.47 7.47 0 0 1-.36 1.85h-.12c-.74 0-1.4.3-1.88.79.3-.5.54-1.06.7-1.64H11.5A2.5 2.5 0 0 1 9 10.5Zm11 3a1.5 1.5 0 0 1 3 0v8a1.5 1.5 0 0 1-3 0v-8ZM17.5 15c-.83 0-1.5.67-1.5 1.5v5a1.5 1.5 0 0 0 3 0v-5c0-.83-.67-1.5-1.5-1.5Zm-4 3c-.83 0-1.5.67-1.5 1.5v2a1.5 1.5 0 0 0 3 0v-2c0-.83-.67-1.5-1.5-1.5Z"/></svg></div>
-    <h1>鸣潮抽卡分析</h1>
-    <div class="desc">上传游戏内导出或 wuwa_gacha.py 抓取的抽卡记录 JSON 文件，即可查看分析报告</div>
-  </div>
-  <div class="upload-zone" id="upload-zone">
-    <div class="zone-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M3.5 6.25c0-.97.78-1.75 1.75-1.75h2.88c.2 0 .39.08.53.22l2.06 2.06c.14.14.33.22.53.22h5.5c.97 0 1.75.78 1.75 1.75 0 .09.01.17.04.25H8.72c-1.34 0-2.58.71-3.25 1.87L3.5 14.28V6.25ZM2 17.79A3.25 3.25 0 0 0 5.25 21h11.04c1.33 0 2.57-.72 3.24-1.88l3.03-5.25A3.25 3.25 0 0 0 19.96 9a.75.75 0 0 0 .04-.25c0-1.8-1.45-3.25-3.25-3.25h-5.19L9.72 3.66c-.42-.42-1-.66-1.6-.66H5.26A3.25 3.25 0 0 0 2 6.25V17.79Zm6.72-7.3h11.03a1.75 1.75 0 0 1 1.51 2.63l-3.03 5.25c-.4.7-1.14 1.13-1.95 1.13H5.25a1.75 1.75 0 0 1-1.51-2.63l3.03-5.25c.4-.7 1.14-1.12 1.95-1.12Z"/></svg></div>
-    <div class="zone-text">拖拽文件到此处，或 <strong>点击选择文件</strong></div>
-    <div class="zone-hint">支持 .json 格式</div>
-    <input type="file" id="file-input" accept=".json" onchange="handleFile(this.files[0])">
+<div class="breadcrumb-bar">
+  <div class="container">
+    <nav class="f2-breadcrumb" aria-label="面包屑导航">
+      <a class="f2-breadcrumb__item f2-breadcrumb__item--current" aria-current="page">上传数据</a>
+    </nav>
   </div>
 </div>
+
+<div class="container">
+  <div class="cards-grid">
+
+    <!-- 卡片1：上传文件 -->
+    <div class="input-card">
+      <div class="input-card__header">
+        <div class="input-card__icon">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2V6.5C10 7.32843 10.6716 8 11.5 8H16V16.5C16 17.3284 15.3284 18 14.5 18H9.74284C10.5282 17.0491 11 15.8296 11 14.5C11 11.4624 8.53757 9 5.5 9C4.97999 9 4.47683 9.07217 4 9.20703V3.5C4 2.67157 4.67157 2 5.5 2H10ZM11 2.25V6.5C11 6.77614 11.2239 7 11.5 7H15.75L11 2.25ZM5.5 19C7.98528 19 10 16.9853 10 14.5C10 12.0147 7.98528 10 5.5 10C3.01472 10 1 12.0147 1 14.5C1 16.9853 3.01472 19 5.5 19ZM7.85353 14.1465C8.04879 14.3418 8.04879 14.6583 7.85353 14.8536C7.65826 15.0489 7.34168 15.0489 7.14642 14.8536L5.99997 13.7072L5.99997 16.5001C5.99997 16.7762 5.77612 17.0001 5.49997 17.0001C5.22383 17.0001 4.99997 16.7762 4.99997 16.5001L4.99997 13.7072L3.85353 14.8536C3.65826 15.0489 3.34168 15.0489 3.14642 14.8536C2.95116 14.6583 2.95116 14.1465 3.14642 14.1465L5.14642 12.1465C5.19436 12.0986 5.24961 12.0624 5.30858 12.038C5.36666 12.0139 5.43027 12.0005 5.49697 12.0001L5.49997 12.0001L5.50297 12.0001C5.56967 12.0005 5.63328 12.0139 5.69136 12.038C5.74947 12.062 5.80396 12.0975 5.8514 12.1444L5.85392 12.1469L7.85353 14.1465Z"/></svg>
+        </div>
+        <div>
+          <div class="input-card__title">上传 JSON 文件</div>
+          <div class="input-card__desc">上传已导出的抽卡记录文件</div>
+        </div>
+      </div>
+      <div class="upload-zone" id="upload-zone">
+        <div class="zone-icon"><svg width="32" height="32" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2V6.5C10 7.32843 10.6716 8 11.5 8H16V16.5C16 17.3284 15.3284 18 14.5 18H9.74284C10.5282 17.0491 11 15.8296 11 14.5C11 11.4624 8.53757 9 5.5 9C4.97999 9 4.47683 9.07217 4 9.20703V3.5C4 2.67157 4.67157 2 5.5 2H10ZM11 2.25V6.5C11 6.77614 11.2239 7 11.5 7H15.75L11 2.25ZM5.5 19C7.98528 19 10 16.9853 10 14.5C10 12.0147 7.98528 10 5.5 10C3.01472 10 1 12.0147 1 14.5C1 16.9853 3.01472 19 5.5 19ZM7.85353 14.1465C8.04879 14.3418 8.04879 14.6583 7.85353 14.8536C7.65826 15.0489 7.34168 15.0489 7.14642 14.8536L5.99997 13.7072L5.99997 16.5001C5.99997 16.7762 5.77612 17.0001 5.49997 17.0001C5.22383 17.0001 4.99997 16.7762 4.99997 16.5001L4.99997 13.7072L3.85353 14.8536C3.65826 15.0489 3.34168 15.0489 3.14642 14.8536C2.95116 14.6583 2.95116 14.1465 3.14642 14.1465L5.14642 12.1465C5.19436 12.0986 5.24961 12.0624 5.30858 12.038C5.36666 12.0139 5.43027 12.0005 5.49697 12.0001L5.49997 12.0001L5.50297 12.0001C5.56967 12.0005 5.63328 12.0139 5.69136 12.038C5.74947 12.062 5.80396 12.0975 5.8514 12.1444L5.85392 12.1469L7.85353 14.1465Z"/></svg></div>
+        <div class="zone-text">拖拽文件到此处，或 <strong>点击选择文件</strong></div>
+        <div class="zone-hint">支持 .json 格式</div>
+        <input type="file" id="file-input" accept=".json" onchange="handleFile(this.files[0])">
+      </div>
+    </div>
+
+    <!-- 卡片2：凭证抓取 -->
+    <div class="input-card">
+      <div class="input-card__header">
+        <div class="input-card__icon">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2C12.8166 2 14.4145 3.92329 14.6469 6.24599L14.7179 6.24599C16.5306 6.24599 18 7.75792 18 9.62299C18 9.71829 17.9962 9.81267 17.9886 9.90598C16.9349 8.5916 15.3157 7.75 13.5 7.75C10.4928 7.75 8.02481 10.0585 7.77144 13H5.28205C3.46942 13 2 11.4881 2 9.62299C2 7.75792 3.46942 6.24599 5.28207 6.24599L5.35314 6.24599C5.58687 3.90802 7.18335 2 10 2ZM13.5 18C11.0147 18 9 15.9853 9 13.5C9 11.0147 11.0147 9 13.5 9C15.9853 9 18 11.0147 18 13.5C18 15.9853 15.9853 18 13.5 18ZM15.1023 13.1023L14 14.2045V11.5C14 11.2239 13.7761 11 13.5 11C13.2239 11 13 11.2239 13 11.5V14.2045L11.8977 13.1023C11.6781 12.8826 11.3219 12.8826 11.1023 13.1023C10.8826 13.3219 10.8826 13.6781 11.1023 13.8977L13.1023 15.8977C13.3219 16.1174 13.6781 16.1174 13.8977 15.8977L15.8977 13.8977C16.1174 13.6781 16.1174 13.3219 15.8977 13.1023C15.6781 12.8826 15.3219 12.8826 15.1023 13.1023Z"/></svg>
+        </div>
+        <div>
+          <div class="input-card__title">提取游戏记录</div>
+          <div class="input-card__desc">输入凭证直接从服务器抓取</div>
+        </div>
+      </div>
+      <label class="f2-infolabel">
+        JSON 凭证
+        <button class="f2-infolabel__info" type="button" onclick="toggleInfoPopover(this)" aria-label="查看凭证格式说明">
+          <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm.5 5.5a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM10 9a.5.5 0 0 1 .5.41V14.59a.5.5 0 0 1-1 0V9.41A.5.5 0 0 1 10 9Z"/></svg>
+          <div class="f2-infolabel__popover">从游戏日志提取的 JSON 凭证，需含 recordId、playerId、serverId、cardPoolId 四个字段</div>
+        </button>
+      </label>
+      <textarea class="f2-textarea" id="cred-input" rows="4" placeholder='粘贴 JSON 凭证，如 {"recordId":"...","playerId":"...","serverId":"...","cardPoolId":"..."}'></textarea>
+      <div class="cred-actions">
+        <button class="f2-btn-primary" id="fetch-btn" onclick="handleFetch()">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3C6.34315 3 5 4.34315 5 6C5 6.27614 4.77614 6.5 4.5 6.5H4.25C3.00736 6.5 2 7.50736 2 8.75C2 9.99264 3.00736 11 4.25 11H5.02242C5.05337 11.3434 5.11588 11.6777 5.20703 12H4.25C2.45507 12 1 10.5449 1 8.75C1 7.029 2.33769 5.62043 4.03004 5.50733C4.27283 3.53062 5.95767 2 8 2C9.92958 2 11.54 3.36628 11.9167 5.1842C11.5678 5.09145 11.2053 5.03214 10.8328 5.0099C10.4237 3.83954 9.30992 3 8 3ZM15 10.5C15 12.9853 12.9853 15 10.5 15C8.01472 15 6 12.9853 6 10.5C6 8.01472 8.01472 6 10.5 6C12.9853 6 15 8.01472 15 10.5ZM10.146 12.8532L10.1486 12.8557C10.196 12.9026 10.2505 12.938 10.3086 12.9621C10.3667 12.9861 10.4303 12.9996 10.497 13L10.5 13L10.503 13C10.5697 12.9996 10.6333 12.9861 10.6914 12.9621C10.7504 12.9377 10.8056 12.9015 10.8536 12.8536L12.8536 10.8536C13.0488 10.6583 13.0488 10.3417 12.8536 10.1464C12.6583 9.95118 12.3417 9.95118 12.1464 10.1464L11 11.2929V8.5C11 8.22386 10.7761 8 10.5 8C10.2239 8 10 8.22386 10 8.5V11.2929L8.85355 10.1464C8.65829 9.95118 8.34171 9.95118 8.14645 10.1464C7.95118 10.3417 7.95118 10.6583 8.14645 10.8536L10.146 12.8532Z"/></svg>
+          <span>抓取记录</span>
+        </button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- 资讯轮播 -->
+  <div class="carousel carousel--loading" id="news-carousel">
+    <div class="carousel__viewport">
+      <span class="carousel__loading-text">资讯加载中...</span>
+    </div>
+  </div>
+
+</div>
+
 <div class="toast-container" id="toast-container"></div>
 
 <script>
 const storageKey = 'wuwa-theme';
 const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   const toggle = document.getElementById('theme-toggle');
@@ -608,21 +750,15 @@ function toggleTheme() {
   localStorage.setItem(storageKey, next);
   applyTheme(next);
 }
-
 const saved = localStorage.getItem(storageKey);
 applyTheme(saved || (mediaQuery.matches ? 'dark' : 'light'));
-mediaQuery.addEventListener('change', e => {
-  if (!localStorage.getItem(storageKey)) applyTheme(e.matches ? 'dark' : 'light');
-});
+mediaQuery.addEventListener('change', e => { if (!localStorage.getItem(storageKey)) applyTheme(e.matches ? 'dark' : 'light'); });
 
 // Drag & drop
 const zone = document.getElementById('upload-zone');
 zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
 zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
-zone.addEventListener('drop', e => {
-  e.preventDefault(); zone.classList.remove('dragover');
-  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
-});
+zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('dragover'); if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]); });
 
 const TOAST_ICONS = {
   success: '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm3.36 6.65-3.75 4.5a.5.5 0 0 1-.72.04l-2.25-2a.5.5 0 1 1 .66-.76l1.87 1.66 3.42-4.1a.5.5 0 0 1 .77.66Z"/></svg>',
@@ -630,51 +766,166 @@ const TOAST_ICONS = {
   warning: '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 11.5a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5ZM10 6a.5.5 0 0 1 .5.41V11.59a.5.5 0 0 1-1 0V6.41A.5.5 0 0 1 10 6Z"/></svg>',
   info: '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm.5 5.5a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM10 9a.5.5 0 0 1 .5.41V14.59a.5.5 0 0 1-1 0V9.41A.5.5 0 0 1 10 9Z"/></svg>'
 };
-
 function showToast(intent, title, body, duration) {
   const container = document.getElementById('toast-container');
   const el = document.createElement('div');
   el.className = 'toast toast--' + intent;
-  el.innerHTML = '<div class="toast__media">' + (TOAST_ICONS[intent] || TOAST_ICONS.info) + '</div>' +
-    '<div class="toast__content"><div class="toast__title">' + title + '</div>' +
-    (body ? '<div class="toast__body">' + body + '</div>' : '') + '</div>' +
-    '<button class="toast__close" onclick="dismissToast(this.parentElement)"><svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="m4.09 4.22.06-.07a.5.5 0 0 1 .63-.06l.07.06L10 9.29l5.15-5.14a.5.5 0 0 1 .63-.06l.07.06c.18.17.2.44.06.63l-.06.07L10.71 10l5.14 5.15c.18.17.2.44.06.63l-.06.07a.5.5 0 0 1-.63.06l-.07-.06L10 10.71l-5.15 5.14a.5.5 0 0 1-.63.06l-.07-.06a.5.5 0 0 1-.06-.63l.06-.07L9.29 10 4.15 4.85a.5.5 0 0 1-.06-.63l.06-.07-.06.07Z"/></svg></button>';
+  el.innerHTML = '<div class="toast__media">' + (TOAST_ICONS[intent] || TOAST_ICONS.info) + '</div><div class="toast__content"><div class="toast__title">' + title + '</div>' + (body ? '<div class="toast__body">' + body + '</div>' : '') + '</div><button class="toast__close" onclick="dismissToast(this.parentElement)"><svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="m4.09 4.22.06-.07a.5.5 0 0 1 .63-.06l.07.06L10 9.29l5.15-5.14a.5.5 0 0 1 .63-.06l.07.06c.18.17.2.44.06.63l-.06.07L10.71 10l5.14 5.15c.18.17.2.44.06.63l-.06.07a.5.5 0 0 1-.63.06l-.07-.06L10 10.71l-5.15 5.14a.5.5 0 0 1-.63.06l-.07-.06a.5.5 0 0 1-.06-.63l.06-.07L9.29 10 4.15 4.85a.5.5 0 0 1-.06-.63l.06-.07-.06.07Z"/></svg></button>';
   container.appendChild(el);
   const timeout = duration !== undefined ? duration : 3000;
   if (timeout > 0) setTimeout(() => dismissToast(el), timeout);
 }
-
-function dismissToast(el) {
-  if (!el || el.classList.contains('toast--exit')) return;
-  el.classList.add('toast--exit');
-  setTimeout(() => el.remove(), 200);
-}
+function dismissToast(el) { if (!el || el.classList.contains('toast--exit')) return; el.classList.add('toast--exit'); setTimeout(() => el.remove(), 200); }
 
 function handleFile(file) {
   if (!file) return;
   showToast('info', '正在上传', file.name);
-
   const formData = new FormData();
   formData.append('file', file);
-
   fetch('/api/upload', { method: 'POST', body: formData })
     .then(r => r.json())
     .then(data => {
+      if (data.ok) { showToast('success', '上传成功', '正在跳转分析页...', 3000); setTimeout(() => window.location.href = '/analysis', 800); }
+      else { showToast('error', '上传失败', data.error || '未知错误', 5000); }
+    })
+    .catch(err => { showToast('error', '网络错误', err.message, 5000); });
+}
+
+function toggleInfoPopover(btn) {
+  btn.classList.toggle('open');
+  const closeHandler = (e) => { if (!btn.contains(e.target)) { btn.classList.remove('open'); document.removeEventListener('click', closeHandler); } };
+  if (btn.classList.contains('open')) setTimeout(() => document.addEventListener('click', closeHandler), 0);
+}
+
+// Cloud Arrow Down 官方图标 SVG (用于按钮恢复状态)
+const CLOUD_ARROW_DOWN_SVG = '<svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2C12.8166 2 14.4145 3.92329 14.6469 6.24599L14.7179 6.24599C16.5306 6.24599 18 7.75792 18 9.62299C18 9.71829 17.9962 9.81267 17.9886 9.90598C16.9349 8.5916 15.3157 7.75 13.5 7.75C10.4928 7.75 8.02481 10.0585 7.77144 13H5.28205C3.46942 13 2 11.4881 2 9.62299C2 7.75792 3.46942 6.24599 5.28207 6.24599L5.35314 6.24599C5.58687 3.90802 7.18335 2 10 2ZM13.5 18C11.0147 18 9 15.9853 9 13.5C9 11.0147 11.0147 9 13.5 9C15.9853 9 18 11.0147 18 13.5C18 15.9853 15.9853 18 13.5 18ZM15.1023 13.1023L14 14.2045V11.5C14 11.2239 13.7761 11 13.5 11C13.2239 11 13 11.2239 13 11.5V14.2045L11.8977 13.1023C11.6781 12.8826 11.3219 12.8826 11.1023 13.1023C10.8826 13.3219 10.8826 13.6781 11.1023 13.8977L13.1023 15.8977C13.3219 16.1174 13.6781 16.1174 13.8977 15.8977L15.8977 13.8977C16.1174 13.6781 16.1174 13.3219 15.8977 13.1023C15.6781 12.8826 15.3219 12.8826 15.1023 13.1023Z"/></svg>';
+
+function handleFetch() {
+  const input = document.getElementById('cred-input').value.trim();
+  const btn = document.getElementById('fetch-btn');
+  if (!input) { showToast('warning', '请输入凭证', 'JSON 凭证不能为空', 5000); return; }
+  let creds;
+  try { creds = JSON.parse(input); } catch (e) { showToast('error', '凭证格式错误', '请输入有效的 JSON 格式', 5000); return; }
+  const required = ['recordId', 'playerId', 'serverId', 'cardPoolId'];
+  const missing = required.filter(f => !creds[f]);
+  if (missing.length) { showToast('error', '凭证字段缺失', '缺少: ' + missing.join(', '), 5000); return; }
+  btn.disabled = true;
+  btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" style="animation:spin 1s linear infinite"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 1a7 7 0 0 1 7 7H3a7 7 0 0 1 7-7Z"/></svg> 抓取中...';
+  showToast('info', '凭证解析成功', '玩家ID: ' + creds.playerId + ' | 服务器: ' + creds.serverId, 5000);
+  const svr_area = creds.serverId.startsWith('2') ? 'global' : 'cn';
+  fetch('/api/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ creds: { ...creds, svr_area } }) })
+    .then(r => r.json())
+    .then(data => {
+      btn.disabled = false;
+      btn.innerHTML = CLOUD_ARROW_DOWN_SVG + ' 抓取记录';
       if (data.ok) {
-        showToast('success', '上传成功', '正在跳转分析页...', 3000);
-        setTimeout(() => window.location.href = '/analysis', 800);
-      } else {
-        showToast('error', '上传失败', data.error || '未知错误');
-      }
+        const poolInfo = (data.pools || []).filter(p => p.count > 0).map(p => p.pool + '(' + p.count + ')').join(' ');
+        showToast('success', '抓取成功', '共 ' + data.total + ' 条记录 ' + poolInfo, 4000);
+        setTimeout(() => window.location.href = '/analysis', 1000);
+      } else { showToast('error', '抓取失败', data.error || '未知错误', 5000); }
     })
     .catch(err => {
-      showToast('error', '网络错误', err.message);
+      btn.disabled = false;
+      btn.innerHTML = CLOUD_ARROW_DOWN_SVG + ' 抓取记录';
+      showToast('error', '网络错误', err.message, 5000);
     });
 }
+
+// ===== Carousel — Fluent UI 2 Top Navigation =====
+(function initCarousel() {
+  const CAROUSEL_INTERVAL = 4000;
+  const ARROW_LEFT = '<svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="M12.65 3.15a.5.5 0 0 1 .7.7L7.41 9l5.94 5.15a.5.5 0 0 1-.7.7L7.05 9.35a.5.5 0 0 1 0-.7l5.6-5.5Z"/></svg>';
+  const ARROW_RIGHT = '<svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="M7.35 3.15c.2-.2.5-.2.7 0l5.65 5.65a.5.5 0 0 1 0 .7L8.05 15.15a.5.5 0 0 1-.7-.7L12.59 9 7.35 3.85a.5.5 0 0 1 0-.7Z"/></svg>';
+  const NAV_ARROW = '<svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="M8.15 4.15a.5.5 0 0 0 0 .7L12.59 9l-4.44 4.15a.5.5 0 0 0 .7.7l5-4.5a.5.5 0 0 0 0-.7l-5-4.5a.5.5 0 0 0-.7 0Z"/></svg>';
+  let currentSlide = 0;
+  let autoTimer = null;
+
+  fetch('/api/news')
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok || !data.news || data.news.length === 0) return;
+      const el = document.getElementById('news-carousel');
+      el.classList.remove('carousel--loading');
+      el.innerHTML = '';
+      const total = data.news.length;
+
+      // — Top Navigation bar (CarouselNavContainer) —
+      const topnav = document.createElement('div');
+      topnav.className = 'carousel__topnav';
+      topnav.innerHTML = `
+        <span class="carousel__topnav-title">官方资讯</span>
+        <span class="carousel__topnav-pager" id="carousel-pager">1/${total}</span>
+        <span class="carousel__topnav-spacer"></span>
+        <div class="carousel__topnav-dots" id="carousel-dots"></div>
+        <button class="carousel__topnav-btn" id="carousel-prev" aria-label="上一条">${ARROW_LEFT}</button>
+        <button class="carousel__topnav-btn" id="carousel-next" aria-label="下一条">${ARROW_RIGHT}</button>`;
+      el.appendChild(topnav);
+
+      // — Slider (CarouselSlider) —
+      const viewport = document.createElement('div');
+      viewport.className = 'carousel__viewport';
+      data.news.forEach((item, i) => {
+        const slide = document.createElement('div');
+        slide.className = 'carousel__slide' + (i === 0 ? ' active' : '');
+        slide.innerHTML = `
+          <div class="carousel__slide-inner">
+            <img src="${item.img}" alt="${item.title}" loading="lazy">
+            <div class="carousel__overlay">
+              <div class="carousel__overlay-tag">资讯</div>
+              <div class="carousel__overlay-title">${item.title}</div>
+              <div class="carousel__overlay-footer">
+                <span class="carousel__overlay-date">${item.date}</span>
+                <a class="carousel__overlay-link" href="${item.url}" target="_blank" rel="noopener noreferrer">${NAV_ARROW} 阅读详情</a>
+              </div>
+            </div>
+          </div>`;
+        viewport.appendChild(slide);
+      });
+      el.appendChild(viewport);
+
+      // — Dot pagination (CarouselNav) —
+      const dotsContainer = document.getElementById('carousel-dots');
+      const dotBtns = [];
+      data.news.forEach((_, i) => {
+        const dot = document.createElement('button');
+        dot.className = 'carousel__topnav-dot' + (i === 0 ? ' active' : '');
+        dot.setAttribute('aria-label', '第' + (i + 1) + '条');
+        dot.onclick = () => { goTo(i); resetTimer(); };
+        dotsContainer.appendChild(dot);
+        dotBtns.push(dot);
+      });
+
+      // — Navigation buttons —
+      const slides = viewport.querySelectorAll('.carousel__slide');
+      const pager = document.getElementById('carousel-pager');
+
+      function goTo(index) {
+        slides[currentSlide].classList.remove('active');
+        dotBtns[currentSlide].classList.remove('active');
+        currentSlide = ((index % total) + total) % total;
+        slides[currentSlide].classList.add('active');
+        dotBtns[currentSlide].classList.add('active');
+        pager.textContent = (currentSlide + 1) + '/' + total;
+      }
+
+      document.getElementById('carousel-prev').onclick = () => { goTo(currentSlide - 1); resetTimer(); };
+      document.getElementById('carousel-next').onclick = () => { goTo(currentSlide + 1); resetTimer(); };
+
+      function resetTimer() { clearInterval(autoTimer); autoTimer = setInterval(() => goTo(currentSlide + 1), CAROUSEL_INTERVAL); }
+      autoTimer = setInterval(() => goTo(currentSlide + 1), CAROUSEL_INTERVAL);
+
+      // Pause on hover
+      el.addEventListener('mouseenter', () => clearInterval(autoTimer));
+      el.addEventListener('mouseleave', () => resetTimer());
+    })
+    .catch(() => {
+      const el = document.getElementById('news-carousel');
+      if (el) { el.classList.remove('carousel--loading'); el.style.display = 'none'; }
+    });
+})();
 </script>
 </body>
 </html>"""
-
 # 分析页模板 — CSS/JS 逻辑与原 gacha_report.py 一致，但数据通过 fetch 获取
 ANALYSIS_PAGE = """<!DOCTYPE html>
 <html lang="zh-CN" data-theme="dark">
@@ -816,6 +1067,7 @@ a { color: var(--colorBrandForeground1); text-decoration: none; }
 .header-inner { display: flex; justify-content: space-between; align-items: center; }
 .header h1 { font-size: 22px; font-weight: 600; color: var(--colorBrandForeground1); }
 .header .meta { color: var(--colorNeutralForeground2); font-size: 13px; margin-top: 2px; }
+.breadcrumb-bar { background: var(--colorNeutralBackground2); border-bottom: 1px solid var(--colorNeutralStroke2); padding: 6px 0; }
 
 /* Theme switcher */
 .theme-switch { display: flex; align-items: center; gap: 8px; color: var(--colorNeutralForeground2); font-size: 14px; }
@@ -849,6 +1101,39 @@ a { color: var(--colorBrandForeground1); text-decoration: none; }
 }
 .theme-icon { font-size: 16px; line-height: 1; transition: opacity 0.2s ease; display: flex; align-items: center; }
 svg.fluent-icon { vertical-align: middle; flex-shrink: 0; }
+
+/* Breadcrumb (Fluent UI 2 — 实测 Storybook) */
+.f2-breadcrumb {
+  display: flex; align-items: center; gap: 0;
+  font-size: 14px; line-height: 20px; font-weight: 400;
+  margin-bottom: 4px;
+}
+.f2-breadcrumb__item {
+  display: flex; align-items: center; justify-content: center;
+  padding: 6px; height: 32px;
+  color: var(--colorNeutralForeground2);
+  text-decoration: none; cursor: pointer;
+  border-radius: 4px; border: none; background: transparent;
+  transition: background 0.1s, color 0.1s;
+}
+.f2-breadcrumb__item:hover {
+  color: var(--colorNeutralForeground1);
+  background: var(--colorSubtleBackgroundHover);
+  text-decoration: none;
+}
+.f2-breadcrumb__item--current {
+  color: var(--colorNeutralForeground2);
+  cursor: default; pointer-events: none;
+}
+.f2-breadcrumb__item--current:hover {
+  color: var(--colorNeutralForeground2);
+  background: transparent;
+}
+.f2-breadcrumb__sep {
+  color: var(--colorNeutralForeground1);
+  display: flex; align-items: center;
+  font-size: 16px; padding: 0; margin: 0;
+}
 
 /* Header actions */
 .header-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
@@ -933,7 +1218,8 @@ svg.fluent-icon { vertical-align: middle; flex-shrink: 0; }
   border-radius: 8px; padding: 16px; box-shadow: var(--shadow2);
   transition: background 0.3s ease, border-color 0.3s ease;
 }
-.fcard h3 { font-size: 13px; font-weight: 600; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--colorNeutralStroke2); color: var(--colorNeutralForeground2); text-transform: uppercase; letter-spacing: 0.6px; }
+.fcard h3 { font-size: 13px; font-weight: 600; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--colorNeutralStroke2); color: var(--colorNeutralForeground2); text-transform: uppercase; letter-spacing: 0.6px; display: flex; align-items: center; gap: 8px; }
+.fcard h3 svg { flex-shrink: 0; }
 .pool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
 @media (max-width: 768px) { .pool-grid { grid-template-columns: 1fr; } }
 
@@ -1295,7 +1581,15 @@ svg.fluent-icon { vertical-align: middle; flex-shrink: 0; }
     </div>
   </div>
 </div>
-
+<div class="breadcrumb-bar">
+  <div class="container">
+    <nav class="f2-breadcrumb" aria-label="面包屑导航">
+      <a class="f2-breadcrumb__item" href="/">上传数据</a>
+      <span class="f2-breadcrumb__sep"><svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="M7.35 3.15c.2-.2.5-.2.7 0l5.65 5.65a.5.5 0 0 1 0 .7L8.05 15.15a.5.5 0 0 1-.7-.7L12.59 9 7.35 3.85a.5.5 0 0 1 0-.7Z"/></svg></span>
+      <a class="f2-breadcrumb__item f2-breadcrumb__item--current" aria-current="page">分析报告</a>
+    </nav>
+  </div>
+</div>
 <div class="container">
   <div id="overview" class="overview"></div>
   <div id="pool-tabs" class="pool-tabs"></div>
@@ -1694,7 +1988,7 @@ function renderPoolContent(pid, a) {
   el.innerHTML = `
     <div class="pool-grid">
       <div class="fcard">
-        <h3>保底进度</h3>
+        <h3><svg class="fluent-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 3.5C2 2.67157 2.67157 2 3.5 2C4.32843 2 5 2.67157 5 3.5V12.5C5 13.3284 4.32843 14 3.5 14C2.67157 14 2 13.3284 2 12.5V3.5ZM3.5 3C3.22386 3 3 3.22386 3 3.5V12.5C3 12.7761 3.22386 13 3.5 13C3.77614 13 4 12.7761 4 12.5V3.5C4 3.22386 3.77614 3 3.5 3ZM6 6.5C6 5.67157 6.67157 5 7.5 5C8.32843 5 9 5.67157 9 6.5V12.5C9 13.3284 8.32843 14 7.5 14C6.67157 14 6 13.3284 6 12.5V6.5ZM7.5 6C7.22386 6 7 6.22386 7 6.5V12.5C7 12.7761 7.22386 13 7.5 13C7.77614 13 8 12.7761 8 12.5V6.5C8 6.22386 7.77614 6 7.5 6ZM11.5 8C10.6716 8 10 8.67157 10 9.5V12.5C10 13.3284 10.6716 14 11.5 14C12.3284 14 13 13.3284 13 12.5V9.5C13 8.67157 12.3284 8 11.5 8ZM11 9.5C11 9.22386 11.2239 9 11.5 9C11.7761 9 12 9.22386 12 9.5V12.5C12 12.7761 11.7761 13 11.5 13C11.2239 13 11 12.7761 11 12.5V9.5Z"/></svg>保底进度</h3>
         <div class="pity-item">
           <div class="pity-label">
             <span>5星保底</span>
@@ -1726,7 +2020,7 @@ function renderPoolContent(pid, a) {
         </div>
       </div>
       <div class="fcard">
-        <h3>统计数据</h3>
+        <h3><svg class="fluent-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M12 7C12 6.31641 12.343 5.71292 12.8662 5.35221C12.3102 2.8616 10.0868 1 7.42857 1C7.18656 1 7 1.20321 7 1.44522V6.5C7 6.77614 7.22386 7 7.5 7H12ZM8 2.03537C10.0678 2.29322 11.7068 3.93217 11.9646 6H8V2.03537ZM1 7.50095C1 10.3698 3.19681 12.7256 6 12.9778V11.9728C3.75008 11.7244 2 9.81706 2 7.50095C2 5.5424 3.25223 3.87461 5 3.25726V7.00005C5 8.10462 5.89543 9.00005 7 9.00005H7.9851L8 9L8.0149 9.00005H9C9 8.63579 9.09738 8.29422 9.26753 8.00005H7C6.44772 8.00005 6 7.55234 6 7.00005V2.5711C6 2.27727 5.74698 2.04482 5.45839 2.1001C2.91894 2.58657 1 4.81966 1 7.50095ZM14 6C13.4477 6 13 6.44771 13 7V14C13 14.5523 13.4477 15 14 15C14.5523 15 15 14.5523 15 14V7C15 6.44772 14.5523 6 14 6ZM11 8C10.4477 8 10 8.44772 10 9V14C10 14.5523 10.4477 15 11 15C11.5523 15 12 14.5523 12 14V9C12 8.44772 11.5523 8 11 8ZM7 11C7 10.4477 7.44772 10 8 10C8.55228 10 9 10.4477 9 11V14C9 14.5523 8.55228 15 8 15C7.44772 15 7 14.5523 7 14V11Z"/></svg>统计数据</h3>
         <div class="stats-grid">
           <div class="stat-item"><span class="label">总抽数</span><span class="val">${a.total}</span></div>
           <div class="stat-item"><span class="label">5星数量</span><span class="val" style="color:var(--colorGoldText)">${a.s5Count}</span></div>
@@ -1742,7 +2036,7 @@ function renderPoolContent(pid, a) {
         </div>
       </div>
     </div>
-    ${a.s5Count?`<hr class="fui-divider inset"><div class="fcard"><h3>5星保底分布</h3><div class="pity-dist">${distH}</div><div class="pity-labels">${lblH}</div></div>`:''}
+    ${a.s5Count?`<hr class="fui-divider inset"><div class="fcard"><h3><svg class="fluent-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M6.5 4V13H9.5V4C9.5 3.44772 9.05228 3 8.5 3H7.5C6.94772 3 6.5 3.44772 6.5 4ZM5.5 7V4C5.5 2.89543 6.39543 2 7.5 2H8.5C9.60457 2 10.5 2.89543 10.5 4V5H12C13.1046 5 14 5.89543 14 7V13.5C14 13.7761 13.7761 14 13.5 14H2.5C2.22386 14 2 13.7761 2 13.5V9C2 7.89543 2.89543 7 4 7H5.5ZM5.5 13V8H4C3.44772 8 3 8.44772 3 9V13H5.5ZM10.5 13H13V7C13 6.44772 12.5523 6 12 6H10.5V13Z"/></svg>5星保底分布</h3><div class="pity-dist">${distH}</div><div class="pity-labels">${lblH}</div></div>`:''}
     ${a.s5Count?`<hr class="fui-divider"><div class="history-section"><h3><svg class="fluent-icon" style="color:var(--colorGoldText)" width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path d="M9.1 2.9a1 1 0 0 1 1.8 0l1.93 3.91 4.31.63a1 1 0 0 1 .56 1.7l-3.12 3.05.73 4.3a1 1 0 0 1-1.45 1.05L10 15.51l-3.86 2.03a1 1 0 0 1-1.45-1.05l.74-4.3L2.3 9.14a1 1 0 0 1 .56-1.7l4.31-.63L9.1 2.9Z"/></svg> 5星获取记录（共${a.s5Count}个）</h3><table class="ftable"><colgroup><col><col><col><col><col><col><col></colgroup><thead><tr><th>序号</th><th>角色</th><th>名称</th><th>类型</th><th>保底抽数</th><th>时间</th><th>标签</th></tr></thead><tbody>${s5rows}</tbody></table></div>`:''}
     ${a.s4Count?`<hr class="fui-divider"><div class="history-section"><h3><svg class="fluent-icon" style="color:var(--colorPurpleText)" width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path d="M9.1 2.9a1 1 0 0 1 1.8 0l1.93 3.91 4.31.63a1 1 0 0 1 .56 1.7l-3.12 3.05.73 4.3a1 1 0 0 1-1.45 1.05L10 15.51l-3.86 2.03a1 1 0 0 1-1.45-1.05l.74-4.3L2.3 9.14a1 1 0 0 1 .56-1.7l4.31-.63L9.1 2.9Z"/></svg> 4星获取记录（共${a.s4Count}个）</h3><table class="ftable"><colgroup><col><col><col><col><col><col><col></colgroup><thead><tr><th>序号</th><th>角色</th><th>名称</th><th>类型</th><th>保底抽数</th><th>时间</th><th></th></tr></thead><tbody>${s4rows}</tbody></table></div>`:''}
     <hr class="fui-divider">
@@ -1857,7 +2151,7 @@ function renderRecordSection(pid, a) {
   const toggleHtml = `
   <div class="fcard">
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-      <h3 style="margin:0">抽卡记录</h3>
+      <h3 style="margin:0"><svg class="fluent-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M13 6C14.1046 6 15 5.10457 15 4C15 2.89543 14.1046 2 13 2C11.8954 2 11 2.89543 11 4C11 4.50867 11.1899 4.97298 11.5027 5.32592L9.96502 7.2478C9.67889 7.08987 9.34994 7 9 7C7.89543 7 7 7.89543 7 9C7 9.28876 7.0612 9.56323 7.17133 9.81114L4.66173 10.8867C4.30275 10.3519 3.69247 10 3 10C1.89543 10 1 10.8954 1 12C1 13.1046 1.89543 14 3 14C4.10457 14 5 13.1046 5 12C5 11.9436 4.99767 11.8878 4.9931 11.8326L7.82529 10.6188C8.15512 10.8586 8.56104 11 9 11C10.1046 11 11 10.1046 11 9C11 8.60935 10.888 8.24487 10.6944 7.9369L12.3347 5.88667C12.5428 5.96007 12.7667 6 13 6ZM13 5C12.4477 5 12 4.55228 12 4C12 3.44772 12.4477 3 13 3C13.5523 3 14 4.55228 14 4C14 4.55228 13.5523 5 13 5ZM4 12C4 12.5523 3.55228 13 3 13C2.44772 13 2 12.5523 2 12C2 11.4477 2.44772 11 3 11C3.55228 11 4 11.4477 4 12ZM10 9C10 9.55228 9.55228 10 9 10C8.44772 10 8 9.55228 8 9C8 8.44772 8.44772 8 9 8C9.55228 8 10 8.44772 10 9Z"/></svg>抽卡记录</h3>
       <div class="record-view-toggle">
         <button class="toggle-btn ${recordViewMode==='grid'?'active':''}" onclick="switchRecordView('grid','${pid}')">
           <svg viewBox="0 0 20 20" fill="currentColor"><path d="M7 2H3a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V3a1 1 0 00-1-1zM7 12H3a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1v-4a1 1 0 00-1-1zM17 2h-4a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V3a1 1 0 00-1-1zM17 12h-4a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1v-4a1 1 0 00-1-1z"/></svg>
@@ -2146,6 +2440,154 @@ def api_upload():
     total = count_records(raw)
     print(f"  上传成功: {filename} ({total}条记录)")
     return jsonify({"ok": True, "total": total, "uid": uid})
+
+# ============================================================
+# 从游戏API抓取抽卡记录（集成 wuwa_gacha.py 功能）
+# ============================================================
+FETCH_API_CN = "https://gmserver-api.aki-game2.com/gacha/record/query"
+FETCH_API_GLOBAL = "https://gmserver-api.aki-game2.net/gacha/record/query"
+FETCH_POOL_NAMES = {
+    "1": "角色活动唤取", "2": "武器活动唤取",
+    "3": "角色常驻唤取", "4": "武器常驻唤取",
+    "5": "新手唤取", "6": "新手自选唤取",
+    "7": "感恩定向唤取", "8": "角色新旅唤取",
+    "9": "武器新旅唤取", "10": "角色联动唤取",
+    "11": "武器联动唤取",
+}
+
+@app.route('/api/news')
+def api_news():
+    """从库洛社区 API 抓取鸣潮官方资讯前6条"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
+            'Origin': 'https://www.kurobbs.com',
+            'Referer': 'https://www.kurobbs.com/',
+            'Accept': 'application/json, text/plain, */*',
+            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+            'devcode': 'FxT0lIpYOMEz28v6RFIwG3mBsttzX1WK',
+            'source': 'h5',
+            'version': '3.0.4',
+            'token': '',
+        }
+        body = {'eventType': '2', 'gameId': '3', 'pageNo': '1', 'pageSize': '6'}
+        resp = req_lib.post('https://api.kurobbs.com/forum/companyEvent/findEventList',
+                            data=body, headers=headers, timeout=10)
+        data = resp.json()
+        if data.get('code') != 200:
+            return jsonify({'ok': False, 'news': []})
+        items = data.get('data', {}).get('list', [])
+        news = []
+        for item in items[:6]:
+            post_id = item.get('postId', '')
+            ts = item.get('publishTime', 0)
+            news.append({
+                'title': item.get('postTitle', ''),
+                'img': item.get('coverUrl', ''),
+                'date': datetime.datetime.fromtimestamp(ts / 1000).strftime('%m-%d') if ts else '',
+                'url': f'https://www.kurobbs.com/mc/post/{post_id}' if post_id else ''
+            })
+        return jsonify({'ok': True, 'news': news})
+    except Exception as e:
+        return jsonify({'ok': False, 'news': [], 'error': str(e)})
+
+@app.route('/api/fetch', methods=['POST'])
+def api_fetch():
+    """从游戏API抓取抽卡记录"""
+    global current_data, current_icon_map
+
+    body = request.get_json(silent=True) or {}
+    creds = body.get('creds')
+    if not creds:
+        return jsonify({"ok": False, "error": "未提供凭证"})
+
+    # 验证必要字段
+    required = ["recordId", "playerId", "serverId", "cardPoolId"]
+    missing = [f for f in required if f not in creds]
+    if missing:
+        return jsonify({"ok": False, "error": f"缺少必要字段: {', '.join(missing)}"})
+
+    player_id = str(creds["playerId"])
+    svr_area = creds.get("svr_area", "cn")
+    api_base = FETCH_API_CN if svr_area == "cn" else FETCH_API_GLOBAL
+
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    }
+
+    result = {"uid": player_id}
+    total = 0
+    pool_results = []
+
+    for pool_type in range(1, 12):
+        pool_name = FETCH_POOL_NAMES.get(str(pool_type), str(pool_type))
+        payload = {
+            "recordId": creds["recordId"],
+            "playerId": creds["playerId"],
+            "serverId": creds["serverId"],
+            "cardPoolId": creds["cardPoolId"],
+            "cardPoolType": pool_type,
+            "languageCode": creds.get("languageCode", "zh-Hans"),
+        }
+
+        try:
+            resp = req_lib.post(api_base, json=payload, headers=headers, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, dict) and (data.get("code") in (0, 200) or data.get("message") == "成功"):
+                records = data.get("data", [])
+                if isinstance(records, list):
+                    transformed = []
+                    for r in records:
+                        raw_cpt = r.get("cardPoolType", str(pool_type))
+                        transformed.append({
+                            "cardPoolType": raw_cpt,
+                            "resourceId": r.get("resourceId", 0),
+                            "qualityLevel": r.get("qualityLevel", 0),
+                            "resourceType": r.get("resourceType", ""),
+                            "name": r.get("name", ""),
+                            "count": r.get("count", 1),
+                            "time": r.get("time", ""),
+                        })
+                    result[str(pool_type)] = transformed
+                    total += len(transformed)
+                    pool_results.append({"pool": pool_name, "count": len(transformed)})
+                else:
+                    pool_results.append({"pool": pool_name, "count": 0})
+            else:
+                pool_results.append({"pool": pool_name, "count": 0})
+        except Exception:
+            pool_results.append({"pool": pool_name, "count": 0})
+
+        if pool_type < 11:
+            time.sleep(0.5)
+
+    if total == 0:
+        return jsonify({"ok": False, "error": "未获取到任何记录，请检查凭证是否正确或已过期"})
+
+    # 保存
+    now = datetime.datetime.now()
+    filename = f"uid_{player_id}_{now.strftime('%Y-%m-%d_%H%M%S')}.json"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False)
+
+    # 排序+修复
+    for k, v in result.items():
+        if k == "uid" or not isinstance(v, list):
+            continue
+        for r in v:
+            t = r.get("time", "")
+            if "2024s-" in t:
+                r["time"] = t.replace("2024s-", "2024-")
+        result[k] = _stable_sort_desc(v)
+
+    current_data = result
+    current_icon_map = cache_icons(result)
+
+    print(f"  抓取成功: {filename} ({total}条记录)")
+    return jsonify({"ok": True, "total": total, "uid": player_id, "pools": pool_results})
 
 @app.route('/api/merge', methods=['POST'])
 def api_merge():
