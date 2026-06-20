@@ -450,11 +450,12 @@ body {
 
 /* --- Header (与分析页统一) --- */
 .header {
-  background: var(--colorNeutralBackground1);
+  background: color-mix(in srgb, var(--colorNeutralBackground1) 80%, transparent);
   border-bottom: 1px solid var(--colorNeutralStroke2);
   padding: 12px 0;
   position: sticky; top: 0; z-index: 100;
   backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   transition: background 0.3s ease;
 }
 .header-inner { display: flex; justify-content: space-between; align-items: center; }
@@ -1310,11 +1311,12 @@ a { color: var(--colorBrandForeground1); text-decoration: none; }
 
 /* Header */
 .header {
-  background: var(--colorNeutralBackground1);
+  background: color-mix(in srgb, var(--colorNeutralBackground1) 80%, transparent);
   border-bottom: 1px solid var(--colorNeutralStroke2);
   padding: 12px 0;
   position: sticky; top: 0; z-index: 100;
   backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   transition: background 0.3s ease;
 }
 .header-inner { display: flex; justify-content: space-between; align-items: center; }
