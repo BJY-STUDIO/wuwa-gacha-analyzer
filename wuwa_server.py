@@ -683,6 +683,27 @@ body {
 .carousel--loading .carousel__viewport { background: linear-gradient(90deg, var(--colorNeutralBackground3) 25%, var(--colorNeutralBackground2) 50%, var(--colorNeutralBackground3) 75%); background-size: 200% 100%; animation: carousel-loading 1.5s infinite; min-height: 180px; display: flex; align-items: center; justify-content: center; }
 .carousel--loading .carousel__loading-text { color: var(--colorNeutralForeground3); font-size: 14px; }
 
+/* Official List — 资讯/公告列表 */
+.official-list { margin-top: 20px; background: var(--colorNeutralBackground1); border-radius: 8px; border: 1px solid var(--colorNeutralStroke2); overflow: hidden; }
+.official-list__tabs { display: flex; border-bottom: 1px solid var(--colorNeutralStroke2); padding: 0 12px; background: var(--colorNeutralBackground2); }
+.official-list__tab { padding: 10px 16px; font-size: 13px; font-weight: 600; color: var(--colorNeutralForeground3); cursor: pointer; border: none; background: none; border-bottom: 2px solid transparent; transition: all 0.15s; line-height: 1; }
+.official-list__tab:hover { color: var(--colorNeutralForeground1); }
+.official-list__tab.active { color: var(--colorCompoundBrandForeground1); border-bottom-color: var(--colorCompoundBrandBackground); }
+.official-list__grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; padding: 12px; min-height: 200px; }
+.official-list__card { display: flex; flex-direction: column; border-radius: 6px; border: 1px solid var(--colorNeutralStroke2); background: var(--colorNeutralBackground2); overflow: hidden; cursor: pointer; transition: all 0.15s; text-decoration: none; color: inherit; }
+.official-list__card:hover { border-color: var(--colorNeutralStroke1); background: var(--colorSubtleBackgroundHover); box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.official-list__card-img { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: var(--colorNeutralBackground3); }
+.official-list__card-body { padding: 10px 12px; flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.official-list__card-title { font-size: 13px; font-weight: 600; color: var(--colorNeutralForeground1); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.official-list__card-date { font-size: 11px; color: var(--colorNeutralForeground3); margin-top: auto; }
+.official-list__empty { grid-column: 1 / -1; text-align: center; padding: 40px 0; color: var(--colorNeutralForeground3); font-size: 14px; }
+.official-list__loader { grid-column: 1 / -1; text-align: center; padding: 16px 0; color: var(--colorNeutralForeground3); font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+.official-list__loader.hidden { display: none; }
+.official-list__spin { width: 16px; height: 16px; border: 2px solid var(--colorNeutralStroke2); border-top-color: var(--colorCompoundBrandBackground); border-radius: 50%; animation: official-spin 0.8s linear infinite; }
+@keyframes official-spin { to { transform: rotate(360deg); } }
+.official-list__card-skeleton { aspect-ratio: 16/9; background: linear-gradient(90deg, var(--colorNeutralBackground3) 25%, var(--colorNeutralBackground2) 50%, var(--colorNeutralBackground3) 75%); background-size: 200% 100%; animation: carousel-loading 1.5s infinite; }
+@media (max-width: 768px) { .official-list__grid { grid-template-columns: 1fr; } }
+
 /* Footer */
 .site-footer { padding: 16px 0; text-align: center; font-size: 12px; color: var(--colorNeutralForeground3); display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; }
 .site-footer a { color: var(--colorNeutralForeground2); text-decoration: none; display: inline-flex; align-items: center; gap: 4px; transition: color 0.15s; }
@@ -770,6 +791,16 @@ body {
     <div class="carousel__viewport">
       <span class="carousel__loading-text">资讯加载中...</span>
     </div>
+  </div>
+
+  <!-- 资讯/公告列表 -->
+  <div class="official-list" id="official-list">
+    <div class="official-list__tabs">
+      <button class="official-list__tab active" data-type="2" onclick="switchOfficialTab(this)">资讯</button>
+      <button class="official-list__tab" data-type="1" onclick="switchOfficialTab(this)">公告</button>
+    </div>
+    <div class="official-list__grid" id="official-grid"></div>
+    <div class="official-list__loader hidden" id="official-loader"><div class="official-list__spin"></div><span>加载中...</span></div>
   </div>
 
 </div>
@@ -1002,6 +1033,107 @@ function handleFetch() {
       if (el) { el.classList.remove('carousel--loading'); el.style.display = 'none'; }
     });
 })();
+
+// ========== Official List — 资讯/公告列表 ==========
+const officialState = { type: '2', page: 1, loading: false, hasMore: true, items: [] };
+
+function switchOfficialTab(btn) {
+  const type = btn.getAttribute('data-type');
+  if (type === officialState.type) return;
+  document.querySelectorAll('.official-list__tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  officialState.type = type;
+  officialState.page = 1;
+  officialState.hasMore = true;
+  officialState.items = [];
+  const grid = document.getElementById('official-grid');
+  grid.innerHTML = '';
+  loadOfficialList();
+}
+
+function renderOfficialCard(item) {
+  const card = document.createElement('a');
+  card.className = 'official-list__card';
+  card.href = item.url;
+  card.target = '_blank';
+  card.rel = 'noopener noreferrer';
+  card.innerHTML =
+    '<div class="official-list__card-skeleton" data-img="' + item.img + '"></div>' +
+    '<div class="official-list__card-body">' +
+      '<div class="official-list__card-title">' + item.title + '</div>' +
+      '<div class="official-list__card-date">' + item.date + '</div>' +
+    '</div>';
+  return card;
+}
+
+function loadOfficialImg(card) {
+  const skeleton = card.querySelector('.official-list__card-skeleton');
+  if (!skeleton) return;
+  const src = skeleton.getAttribute('data-img');
+  if (!src) { skeleton.classList.remove('official-list__card-skeleton'); return; }
+  const img = new Image();
+  img.onload = function() {
+    skeleton.className = 'official-list__card-img';
+    skeleton.removeAttribute('data-img');
+    skeleton.style.backgroundImage = 'url(' + src + ')';
+    skeleton.style.backgroundSize = 'cover';
+    skeleton.style.backgroundPosition = 'center';
+  };
+  img.onerror = function() {
+    skeleton.classList.remove('official-list__card-skeleton');
+    skeleton.removeAttribute('data-img');
+  };
+  img.src = src;
+}
+
+function loadOfficialList() {
+  if (officialState.loading || !officialState.hasMore) return;
+  officialState.loading = true;
+  const loader = document.getElementById('official-loader');
+  loader.classList.remove('hidden');
+
+  const params = new URLSearchParams({ type: officialState.type, page: String(officialState.page), size: '8' });
+  fetch('/api/official?' + params.toString())
+    .then(r => r.json())
+    .then(data => {
+      officialState.loading = false;
+      loader.classList.add('hidden');
+      if (!data.ok) return;
+      const grid = document.getElementById('official-grid');
+      data.list.forEach(item => {
+        const card = renderOfficialCard(item);
+        grid.appendChild(card);
+        loadOfficialImg(card);
+        officialState.items.push(item);
+      });
+      officialState.hasMore = data.hasMore;
+      if (officialState.items.length === 0) {
+        grid.innerHTML = '<div class="official-list__empty">暂无内容</div>';
+        officialState.hasMore = false;
+      }
+    })
+    .catch(() => {
+      officialState.loading = false;
+      loader.classList.add('hidden');
+    });
+}
+
+// Scroll-based infinite load
+function checkOfficialScroll() {
+  if (officialState.loading || !officialState.hasMore) return;
+  const container = document.getElementById('official-list');
+  if (!container) return;
+  const rect = container.getBoundingClientRect();
+  if (rect.bottom < window.innerHeight + 200) {
+    officialState.page++;
+    loadOfficialList();
+  }
+}
+window.addEventListener('scroll', checkOfficialScroll, { passive: true });
+window.addEventListener('touchmove', checkOfficialScroll, { passive: true });
+
+// Initial load
+setTimeout(() => { loadOfficialList(); }, 100);
 </script>
 <footer class="site-footer">
   <a href="https://github.com/BJY-STUDIO/wuwa-gacha-analyzer" target="_blank" rel="noopener noreferrer"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg> BJY-STUDIO</a>
@@ -2586,7 +2718,50 @@ def api_news():
     except Exception as e:
         return jsonify({'ok': False, 'news': [], 'error': str(e)})
 
-@app.route('/api/fetch', methods=['POST'])
+@app.route('/api/official')
+def api_official():
+    """从库洛社区 API 抓取鸣潮官方资讯/公告列表（分页）"""
+    event_type = request.args.get('type', '2')  # 1=公告, 2=资讯
+    page_no = request.args.get('page', '1')
+    page_size = request.args.get('size', '8')
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
+            'Origin': 'https://www.kurobbs.com',
+            'Referer': 'https://www.kurobbs.com/',
+            'Accept': 'application/json, text/plain, */*',
+            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+            'devcode': 'FxT0lIpYOMEz28v6RFIwG3mBsttzX1WK',
+            'source': 'h5',
+            'version': '3.0.4',
+            'token': '',
+        }
+        body = {'eventType': event_type, 'gameId': '3',
+                'pageNo': page_no, 'pageSize': page_size}
+        resp = req_lib.post('https://api.kurobbs.com/forum/companyEvent/findEventList',
+                            data=body, headers=headers, timeout=10, verify=False)
+        data = resp.json()
+        if data.get('code') != 200:
+            return jsonify({'ok': False, 'list': [], 'hasMore': False})
+        page_data = data.get('data', {})
+        items = page_data.get('list', [])
+        result = []
+        for item in items:
+            post_id = item.get('postId', '')
+            ts = item.get('publishTime', 0)
+            result.append({
+                'id': item.get('id', ''),
+                'postId': post_id,
+                'title': item.get('postTitle', ''),
+                'img': item.get('coverUrl', ''),
+                'date': datetime.datetime.fromtimestamp(ts / 1000).strftime('%m-%d') if ts else '',
+                'url': f'https://www.kurobbs.com/mc/post/{post_id}' if post_id else '',
+                'eventType': item.get('eventType', 0),
+            })
+        has_more = page_data.get('hasNextPage', False)
+        return jsonify({'ok': True, 'list': result, 'hasMore': has_more})
+    except Exception as e:
+        return jsonify({'ok': False, 'list': [], 'hasMore': False, 'error': str(e)})
 def api_fetch():
     """从游戏API抓取抽卡记录 — SSE 流式返回逐池进度"""
     global current_data, current_icon_map
