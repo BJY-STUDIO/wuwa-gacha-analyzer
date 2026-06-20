@@ -571,6 +571,7 @@ body {
 .f2-btn-primary:focus-visible { box-shadow: 0 0 0 2px var(--colorNeutralBackground1), 0 0 0 4px var(--colorCompoundBrandStroke); outline: none; }
 .f2-btn-primary:disabled { background: var(--colorNeutralBackground2); color: var(--colorNeutralForeground3); cursor: not-allowed; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.spin-anim { animation: spin 1s linear infinite; }
 
 /* --- Toast (与分析页统一) --- */
 .toast-container { position: fixed; bottom: 16px; right: 20px; width: 292px; pointer-events: none; z-index: 9999; }
@@ -772,15 +773,20 @@ const TOAST_ICONS = {
   warning: '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 11.5a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5ZM10 6a.5.5 0 0 1 .5.41V11.59a.5.5 0 0 1-1 0V6.41A.5.5 0 0 1 10 6Z"/></svg>',
   info: '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm.5 5.5a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM10 9a.5.5 0 0 1 .5.41V14.59a.5.5 0 0 1-1 0V9.41A.5.5 0 0 1 10 9Z"/></svg>'
 };
-function showToast(intent, title, body, duration) {
+function addToast(intent, title, body, duration) {
   const container = document.getElementById('toast-container');
+  // Keep at most 3 toasts — dismiss oldest if exceeding
+  const existing = container.querySelectorAll('.toast:not(.toast--exit)');
+  if (existing.length >= 3) dismissToast(existing[0]);
   const el = document.createElement('div');
   el.className = 'toast toast--' + intent;
   el.innerHTML = '<div class="toast__media">' + (TOAST_ICONS[intent] || TOAST_ICONS.info) + '</div><div class="toast__content"><div class="toast__title">' + title + '</div>' + (body ? '<div class="toast__body">' + body + '</div>' : '') + '</div><button class="toast__close" onclick="dismissToast(this.parentElement)"><svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="m4.09 4.22.06-.07a.5.5 0 0 1 .63-.06l.07.06L10 9.29l5.15-5.14a.5.5 0 0 1 .63-.06l.07.06c.18.17.2.44.06.63l-.06.07L10.71 10l5.14 5.15c.18.17.2.44.06.63l-.06.07a.5.5 0 0 1-.63.06l-.07-.06L10 10.71l-5.15 5.14a.5.5 0 0 1-.63.06l-.07-.06a.5.5 0 0 1-.06-.63l.06-.07L9.29 10 4.15 4.85a.5.5 0 0 1-.06-.63l.06-.07-.06.07Z"/></svg></button>';
   container.appendChild(el);
   const timeout = duration !== undefined ? duration : 3000;
   if (timeout > 0) setTimeout(() => dismissToast(el), timeout);
+  return el;
 }
+function showToast(intent, title, body, duration) { addToast(intent, title, body, duration); }
 function dismissToast(el) { if (!el || el.classList.contains('toast--exit')) return; el.classList.add('toast--exit'); setTimeout(() => el.remove(), 200); }
 
 function handleFile(file) {
@@ -816,19 +822,53 @@ function handleFetch() {
   const missing = required.filter(f => !creds[f]);
   if (missing.length) { showToast('error', '凭证字段缺失', '缺少: ' + missing.join(', '), 5000); return; }
   btn.disabled = true;
-  btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" style="animation:spin 1s linear infinite"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 1a7 7 0 0 1 7 7H3a7 7 0 0 1 7-7Z"/></svg> 抓取中...';
-  showToast('info', '凭证解析成功', '玩家ID: ' + creds.playerId + ' | 服务器: ' + creds.serverId, 5000);
+  btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" class="spin-anim"><path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 1a7 7 0 0 1 7 7H3a7 7 0 0 1 7-7Z"/></svg> 抓取中...';
+  showToast('info', '凭证解析成功', '玩家 ' + creds.playerId, 4000);
   const svr_area = creds.serverId.startsWith('2') ? 'global' : 'cn';
+  let lastProgressToast = null;
   fetch('/api/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ creds: { ...creds, svr_area } }) })
-    .then(r => r.json())
-    .then(data => {
-      btn.disabled = false;
-      btn.innerHTML = CLOUD_ARROW_DOWN_SVG + ' 抓取记录';
-      if (data.ok) {
-        const poolInfo = (data.pools || []).filter(p => p.count > 0).map(p => p.pool + '(' + p.count + ')').join(' ');
-        showToast('success', '抓取成功', '共 ' + data.total + ' 条记录 ' + poolInfo, 4000);
-        setTimeout(() => window.location.href = '/analysis', 1000);
-      } else { showToast('error', '抓取失败', data.error || '未知错误', 5000); }
+    .then(r => {
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      function read() {
+        return reader.read().then(({ done, value }) => {
+          if (done) return;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\\n');
+          buffer = lines.pop();
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            try {
+              const evt = JSON.parse(line.slice(6));
+              if (evt.type === 'progress') {
+                const label = '[' + evt.index + '/' + evt.total_pools + '] ' + evt.pool;
+                if (lastProgressToast) dismissToast(lastProgressToast);
+                lastProgressToast = addToast('info', '正在获取', label, 10000);
+              } else if (evt.type === 'result') {
+                if (lastProgressToast) { dismissToast(lastProgressToast); lastProgressToast = null; }
+                if (evt.count > 0) showToast('success', evt.pool, '获取记录 ' + evt.count + ' 条', 1500);
+              } else if (evt.type === 'done') {
+                if (lastProgressToast) { dismissToast(lastProgressToast); lastProgressToast = null; }
+                btn.disabled = false;
+                btn.innerHTML = CLOUD_ARROW_DOWN_SVG + ' 抓取记录';
+                showToast('success', '获取成功', '正在跳转分析界面...', 3000);
+                fetch('/api/load?file=' + encodeURIComponent(evt.filename))
+                  .then(r => r.json())
+                  .then(d => { if (d.ok) window.location.href = '/analysis'; })
+                  .catch(() => { window.location.href = '/analysis'; });
+              } else if (evt.type === 'error') {
+                if (lastProgressToast) { dismissToast(lastProgressToast); lastProgressToast = null; }
+                btn.disabled = false;
+                btn.innerHTML = CLOUD_ARROW_DOWN_SVG + ' 抓取记录';
+                showToast('error', '抓取失败', evt.error || '未知错误', 5000);
+              }
+            } catch (e) {}
+          }
+          return read();
+        });
+      }
+      return read();
     })
     .catch(err => {
       btn.disabled = false;
@@ -2515,7 +2555,7 @@ def api_news():
 
 @app.route('/api/fetch', methods=['POST'])
 def api_fetch():
-    """从游戏API抓取抽卡记录"""
+    """从游戏API抓取抽卡记录 — SSE 流式返回逐池进度"""
     global current_data, current_icon_map
 
     body = request.get_json(silent=True) or {}
@@ -2538,78 +2578,121 @@ def api_fetch():
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
 
-    result = {"uid": player_id}
-    total = 0
-    pool_results = []
+    def generate():
+        result = {"uid": player_id}
+        total = 0
+        pool_results = []
 
-    for pool_type in range(1, 12):
-        pool_name = FETCH_POOL_NAMES.get(str(pool_type), str(pool_type))
-        payload = {
-            "recordId": creds["recordId"],
-            "playerId": creds["playerId"],
-            "serverId": creds["serverId"],
-            "cardPoolId": creds["cardPoolId"],
-            "cardPoolType": pool_type,
-            "languageCode": creds.get("languageCode", "zh-Hans"),
-        }
+        for pool_type in range(1, 12):
+            pool_name = FETCH_POOL_NAMES.get(str(pool_type), str(pool_type))
+            # 推送"正在获取"进度
+            yield f"data: {json.dumps({'type': 'progress', 'pool': pool_name, 'index': pool_type, 'total_pools': 11}, ensure_ascii=False)}\n\n"
 
-        try:
-            resp = req_lib.post(api_base, json=payload, headers=headers, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, dict) and (data.get("code") in (0, 200) or data.get("message") == "成功"):
-                records = data.get("data", [])
-                if isinstance(records, list):
-                    transformed = []
-                    for r in records:
-                        raw_cpt = r.get("cardPoolType", str(pool_type))
-                        transformed.append({
-                            "cardPoolType": raw_cpt,
-                            "resourceId": r.get("resourceId", 0),
-                            "qualityLevel": r.get("qualityLevel", 0),
-                            "resourceType": r.get("resourceType", ""),
-                            "name": r.get("name", ""),
-                            "count": r.get("count", 1),
-                            "time": r.get("time", ""),
-                        })
-                    result[str(pool_type)] = transformed
-                    total += len(transformed)
-                    pool_results.append({"pool": pool_name, "count": len(transformed)})
-                else:
-                    pool_results.append({"pool": pool_name, "count": 0})
-            else:
-                pool_results.append({"pool": pool_name, "count": 0})
-        except Exception:
-            pool_results.append({"pool": pool_name, "count": 0})
+            count = 0
+            try:
+                resp = req_lib.post(api_base, json={
+                    "recordId": creds["recordId"],
+                    "playerId": creds["playerId"],
+                    "serverId": creds["serverId"],
+                    "cardPoolId": creds["cardPoolId"],
+                    "cardPoolType": pool_type,
+                    "languageCode": creds.get("languageCode", "zh-Hans"),
+                }, headers=headers, timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+                if isinstance(data, dict) and (data.get("code") in (0, 200) or data.get("message") == "成功"):
+                    records = data.get("data", [])
+                    if isinstance(records, list):
+                        transformed = []
+                        for r in records:
+                            raw_cpt = r.get("cardPoolType", str(pool_type))
+                            transformed.append({
+                                "cardPoolType": raw_cpt,
+                                "resourceId": r.get("resourceId", 0),
+                                "qualityLevel": r.get("qualityLevel", 0),
+                                "resourceType": r.get("resourceType", ""),
+                                "name": r.get("name", ""),
+                                "count": r.get("count", 1),
+                                "time": r.get("time", ""),
+                            })
+                        result[str(pool_type)] = transformed
+                        count = len(transformed)
+                        total += count
+            except Exception:
+                pass
 
-        if pool_type < 11:
-            time.sleep(0.5)
+            pool_results.append({"pool": pool_name, "count": count})
+            # 推送"获取完成"结果
+            yield f"data: {json.dumps({'type': 'result', 'pool': pool_name, 'count': count, 'index': pool_type, 'total_pools': 11}, ensure_ascii=False)}\n\n"
 
-    if total == 0:
-        return jsonify({"ok": False, "error": "未获取到任何记录，请检查凭证是否正确或已过期"})
+            if pool_type < 11:
+                time.sleep(0.5)
 
-    # 保存
-    now = datetime.datetime.now()
-    filename = f"uid_{player_id}_{now.strftime('%Y-%m-%d_%H%M%S')}.json"
+        if total == 0:
+            yield f"data: {json.dumps({'type': 'error', 'error': '未获取到任何记录，请检查凭证是否正确或已过期'}, ensure_ascii=False)}\n\n"
+            return
+
+        # 保存
+        now = datetime.datetime.now()
+        filename = f"uid_{player_id}_{now.strftime('%Y-%m-%d_%H%M%S')}.json"
+        filepath = os.path.join(UPLOAD_DIR, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False)
+
+        # 排序+修复
+        for k, v in result.items():
+            if k == "uid" or not isinstance(v, list):
+                continue
+            for r in v:
+                t = r.get("time", "")
+                if "2024s-" in t:
+                    r["time"] = t.replace("2024s-", "2024-")
+            result[k] = _stable_sort_desc(v)
+
+        current_data = result
+        current_icon_map = cache_icons(result)
+
+        print(f"  抓取成功: {filename} ({total}条记录)")
+        # 推送最终完成
+        yield f"data: {json.dumps({'type': 'done', 'ok': True, 'total': total, 'uid': player_id, 'pools': pool_results, 'filename': filename}, ensure_ascii=False)}\n\n"
+
+    return app.response_class(generate(), mimetype='text/event-stream',
+                              headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+@app.route('/api/load')
+def api_load():
+    """从已保存的文件加载数据到内存（SSE完成后由前端调用）"""
+    global current_data, current_icon_map
+
+    filename = request.args.get('file', '')
+    if not filename:
+        return jsonify({"ok": False, "error": "未指定文件名"})
+
     filepath = os.path.join(UPLOAD_DIR, filename)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False)
+    if not os.path.isfile(filepath):
+        return jsonify({"ok": False, "error": "文件不存在"})
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"文件读取失败: {e}"})
 
     # 排序+修复
-    for k, v in result.items():
+    for k, v in raw.items():
         if k == "uid" or not isinstance(v, list):
             continue
         for r in v:
             t = r.get("time", "")
             if "2024s-" in t:
                 r["time"] = t.replace("2024s-", "2024-")
-        result[k] = _stable_sort_desc(v)
+        raw[k] = _stable_sort_desc(v)
 
-    current_data = result
-    current_icon_map = cache_icons(result)
-
-    print(f"  抓取成功: {filename} ({total}条记录)")
-    return jsonify({"ok": True, "total": total, "uid": player_id, "pools": pool_results})
+    current_data = raw
+    current_icon_map = cache_icons(raw)
+    total = count_records(raw)
+    print(f"  加载成功: {filename} ({total}条记录)")
+    return jsonify({"ok": True, "total": total, "uid": raw.get("uid", "unknown")})
 
 @app.route('/api/merge', methods=['POST'])
 def api_merge():
