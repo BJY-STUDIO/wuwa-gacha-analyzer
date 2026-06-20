@@ -1473,6 +1473,8 @@ svg.fluent-icon { vertical-align: middle; flex-shrink: 0; }
 }
 .fcard h3 { font-size: 13px; font-weight: 600; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--colorNeutralStroke2); color: var(--colorNeutralForeground2); text-transform: uppercase; letter-spacing: 0.6px; display: flex; align-items: center; gap: 8px; }
 .fcard h3 svg { flex-shrink: 0; }
+.fcard .record-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--colorNeutralStroke2); }
+.fcard .record-header h3 { margin: 0; padding: 0; border: none; }
 .pool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
 @media (max-width: 768px) { .pool-grid { grid-template-columns: 1fr; } }
 
@@ -1646,7 +1648,7 @@ svg.fluent-icon { vertical-align: middle; flex-shrink: 0; }
 /* ── 抽卡记录宫格/横向 ── */
 .record-view-toggle {
   display: flex; gap: 2px; background: var(--colorNeutralBackground3);
-  border-radius: 4px; padding: 2px; margin-bottom: 12px; width: fit-content;
+  border-radius: 4px; padding: 2px; width: fit-content;
 }
 .record-view-toggle .toggle-btn {
   display: flex; align-items: center; gap: 4px;
@@ -2409,8 +2411,8 @@ function renderRecordSection(pid, a) {
   // 视图切换控件
   const toggleHtml = `
   <div class="fcard">
-    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-      <h3 style="margin:0"><svg class="fluent-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M13 6C14.1046 6 15 5.10457 15 4C15 2.89543 14.1046 2 13 2C11.8954 2 11 2.89543 11 4C11 4.50867 11.1899 4.97298 11.5027 5.32592L9.96502 7.2478C9.67889 7.08987 9.34994 7 9 7C7.89543 7 7 7.89543 7 9C7 9.28876 7.0612 9.56323 7.17133 9.81114L4.66173 10.8867C4.30275 10.3519 3.69247 10 3 10C1.89543 10 1 10.8954 1 12C1 13.1046 1.89543 14 3 14C4.10457 14 5 13.1046 5 12C5 11.9436 4.99767 11.8878 4.9931 11.8326L7.82529 10.6188C8.15512 10.8586 8.56104 11 9 11C10.1046 11 11 10.1046 11 9C11 8.60935 10.888 8.24487 10.6944 7.9369L12.3347 5.88667C12.5428 5.96007 12.7667 6 13 6ZM13 5C12.4477 5 12 4.55228 12 4C12 3.44772 12.4477 3 13 3C13.5523 3 14 4.55228 14 4C14 4.55228 13.5523 5 13 5ZM4 12C4 12.5523 3.55228 13 3 13C2.44772 13 2 12.5523 2 12C2 11.4477 2.44772 11 3 11C3.55228 11 4 11.4477 4 12ZM10 9C10 9.55228 9.55228 10 9 10C8.44772 10 8 9.55228 8 9C8 8.44772 8.44772 8 9 8C9.55228 8 10 8.44772 10 9Z"/></svg>抽卡记录</h3>
+    <div class="record-header">
+      <h3><svg class="fluent-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M13 6C14.1046 6 15 5.10457 15 4C15 2.89543 14.1046 2 13 2C11.8954 2 11 2.89543 11 4C11 4.50867 11.1899 4.97298 11.5027 5.32592L9.96502 7.2478C9.67889 7.08987 9.34994 7 9 7C7.89543 7 7 7.89543 7 9C7 9.28876 7.0612 9.56323 7.17133 9.81114L4.66173 10.8867C4.30275 10.3519 3.69247 10 3 10C1.89543 10 1 10.8954 1 12C1 13.1046 1.89543 14 3 14C4.10457 14 5 13.1046 5 12C5 11.9436 4.99767 11.8878 4.9931 11.8326L7.82529 10.6188C8.15512 10.8586 8.56104 11 9 11C10.1046 11 11 10.1046 11 9C11 8.60935 10.888 8.24487 10.6944 7.9369L12.3347 5.88667C12.5428 5.96007 12.7667 6 13 6ZM13 5C12.4477 5 12 4.55228 12 4C12 3.44772 12.4477 3 13 3C13.5523 3 14 4.55228 14 4C14 4.55228 13.5523 5 13 5ZM4 12C4 12.5523 3.55228 13 3 13C2.44772 13 2 12.5523 2 12C2 11.4477 2.44772 11 3 11C3.55228 11 4 11.4477 4 12ZM10 9C10 9.55228 9.55228 10 9 10C8.44772 10 8 9.55228 8 9C8 8.44772 8.44772 8 9 8C9.55228 8 10 8.44772 10 9Z"/></svg>抽卡记录</h3>
       <div class="record-view-toggle">
         <button class="toggle-btn ${recordViewMode==='grid'?'active':''}" onclick="switchRecordView('grid','${pid}')">
           <svg viewBox="0 0 20 20" fill="currentColor"><path d="M7 2H3a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V3a1 1 0 00-1-1zM7 12H3a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1v-4a1 1 0 00-1-1zM17 2h-4a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V3a1 1 0 00-1-1zM17 12h-4a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1v-4a1 1 0 00-1-1z"/></svg>
