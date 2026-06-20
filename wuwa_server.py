@@ -16,10 +16,16 @@
   python wuwa_server.py --port 9000  # 指定端口
 """
 
-import json, os, sys, datetime, urllib.request, argparse, time
+import json, os, sys, datetime, argparse, time
 import requests as req_lib
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, jsonify, send_from_directory, render_template_string
+
+# 抑制 requests verify=False 的 InsecureRequestWarning
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============================================================
 # 配置
@@ -65,9 +71,9 @@ def _fetch_encore_mapping():
     try:
         # 角色
         print("  正在获取 encore.moe 角色映射...")
-        req = urllib.request.Request(ENCORE_CHAR_API, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            char_data = json.loads(resp.read().decode("utf-8"))
+        resp = req_lib.get(ENCORE_CHAR_API, headers={"User-Agent": "Mozilla/5.0"},
+                           timeout=30, verify=False)
+        char_data = resp.json()
         for char in char_data.get("roleList", []):
             rid = str(char.get("Id", ""))
             icon = char.get("RoleHeadIcon", "")
@@ -77,9 +83,9 @@ def _fetch_encore_mapping():
 
         # 武器
         print("  正在获取 encore.moe 武器映射...")
-        req = urllib.request.Request(ENCORE_WEAPON_API, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            weapon_data = json.loads(resp.read().decode("utf-8"))
+        resp = req_lib.get(ENCORE_WEAPON_API, headers={"User-Agent": "Mozilla/5.0"},
+                           timeout=30, verify=False)
+        weapon_data = resp.json()
         for wp in weapon_data.get("weapons", []):
             rid = str(wp.get("Id", ""))
             icon = wp.get("Icon", "")
@@ -118,6 +124,11 @@ def ensure_icon_dirs():
     os.makedirs(ICONS_CHAR_DIR, exist_ok=True)
     os.makedirs(ICONS_WEAPON_DIR, exist_ok=True)
 
+def _download_url(url, timeout=15):
+    """下载URL内容，关闭SSL验证以兼容Windows证书不全的问题"""
+    return req_lib.get(url, headers={"User-Agent": "Mozilla/5.0"},
+                       timeout=timeout, verify=False)
+
 def download_icon(resource_id, resource_type):
     if not resource_id:
         return (resource_id, "")
@@ -138,26 +149,24 @@ def download_icon(resource_id, resource_type):
         # 角色：CDN 优先
         cdn_url = f"{CDN_CHAR_BASE}/{rid}.png"
         try:
-            req = urllib.request.Request(cdn_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                if resp.status == 200:
-                    local_path = os.path.join(local_dir, f"{rid}.png")
-                    with open(local_path, "wb") as f:
-                        f.write(resp.read())
-                    return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
+            resp = _download_url(cdn_url)
+            if resp.status_code == 200:
+                local_path = os.path.join(local_dir, f"{rid}.png")
+                with open(local_path, "wb") as f:
+                    f.write(resp.content)
+                return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
         except Exception as e:
             last_err = f"CDN角色: {e}"
         # CDN 失败 → encore.moe
         encore_url = _encore_icon_map.get(rid)
         if encore_url:
             try:
-                req = urllib.request.Request(encore_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    if resp.status == 200:
-                        local_path = os.path.join(local_dir, f"{rid}.webp")
-                        with open(local_path, "wb") as f:
-                            f.write(resp.read())
-                        return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
+                resp = _download_url(encore_url)
+                if resp.status_code == 200:
+                    local_path = os.path.join(local_dir, f"{rid}.webp")
+                    with open(local_path, "wb") as f:
+                        f.write(resp.content)
+                    return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
             except Exception as e:
                 last_err = f"encore角色: {e}"
         else:
@@ -166,30 +175,28 @@ def download_icon(resource_id, resource_type):
         # 武器：CDN IconWeapon160 优先（高分辨率 png）→ encore.moe 兜底（webp）
         cdn_url = f"{CDN_WEAPON_BASE}/{rid}.png"
         try:
-            req = urllib.request.Request(cdn_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = resp.read()
-                # CDN 可能返回 HTML 404 页面，需验证是真实 PNG
-                if resp.status == 200 and data[:4] == b'\x89PNG':
-                    local_path = os.path.join(local_dir, f"{rid}.png")
-                    with open(local_path, "wb") as f:
-                        f.write(data)
-                    return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
-                else:
-                    last_err = f"CDN武器: 非PNG响应({resp.status})"
+            resp = _download_url(cdn_url)
+            data = resp.content
+            # CDN 可能返回 HTML 404 页面，需验证是真实 PNG
+            if resp.status_code == 200 and data[:4] == b'\x89PNG':
+                local_path = os.path.join(local_dir, f"{rid}.png")
+                with open(local_path, "wb") as f:
+                    f.write(data)
+                return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
+            else:
+                last_err = f"CDN武器: 非PNG响应({resp.status_code})"
         except Exception as e:
             last_err = f"CDN武器: {e}"
         # CDN 失败或返回非图片 → encore.moe 兜底
         encore_url = _encore_icon_map.get(rid)
         if encore_url:
             try:
-                req = urllib.request.Request(encore_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    if resp.status == 200:
-                        local_path = os.path.join(local_dir, f"{rid}.webp")
-                        with open(local_path, "wb") as f:
-                            f.write(resp.read())
-                        return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
+                resp = _download_url(encore_url)
+                if resp.status_code == 200:
+                    local_path = os.path.join(local_dir, f"{rid}.webp")
+                    with open(local_path, "wb") as f:
+                        f.write(resp.content)
+                    return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
             except Exception as e:
                 last_err = f"encore武器: {e}"
         else:
