@@ -797,7 +797,7 @@ body {
   <div class="official-list" id="official-list">
     <div class="official-list__tabs">
       <button class="official-list__tab active" data-type="2" onclick="switchOfficialTab(this)">资讯</button>
-      <button class="official-list__tab" data-type="1" onclick="switchOfficialTab(this)">公告</button>
+      <button class="official-list__tab" data-type="3" onclick="switchOfficialTab(this)">公告</button>
     </div>
     <div class="official-list__grid" id="official-grid"></div>
     <div class="official-list__loader hidden" id="official-loader"><div class="official-list__spin"></div><span>加载中...</span></div>
@@ -2721,7 +2721,7 @@ def api_news():
 @app.route('/api/official')
 def api_official():
     """从库洛社区 API 抓取鸣潮官方资讯/公告列表（分页）"""
-    event_type = request.args.get('type', '2')  # 1=公告, 2=资讯
+    event_type = request.args.get('type', '2')  # 2=资讯, 3=公告
     page_no = request.args.get('page', '1')
     page_size = request.args.get('size', '8')
     try:
