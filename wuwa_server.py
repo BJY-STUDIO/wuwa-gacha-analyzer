@@ -133,6 +133,7 @@ def download_icon(resource_id, resource_type):
 
     # 2) 角色图标：CDN 主源 → encore.moe 备用
     #    武器图标：encore.moe 优先（高分辨率 webp）→ CDN IconWeapon80 兜底（低分辨率 png）
+    last_err = None
     if is_char:
         # 角色：CDN 优先
         cdn_url = f"{CDN_CHAR_BASE}/{rid}.png"
@@ -144,8 +145,8 @@ def download_icon(resource_id, resource_type):
                     with open(local_path, "wb") as f:
                         f.write(resp.read())
                     return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
-        except Exception:
-            pass
+        except Exception as e:
+            last_err = f"CDN角色: {e}"
         # CDN 失败 → encore.moe
         encore_url = _encore_icon_map.get(rid)
         if encore_url:
@@ -157,8 +158,10 @@ def download_icon(resource_id, resource_type):
                         with open(local_path, "wb") as f:
                             f.write(resp.read())
                         return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
-            except Exception:
-                pass
+            except Exception as e:
+                last_err = f"encore角色: {e}"
+        else:
+            last_err = last_err or "encore角色: 无映射"
     else:
         # 武器：CDN IconWeapon160 优先（高分辨率 png）→ encore.moe 兜底（webp）
         cdn_url = f"{CDN_WEAPON_BASE}/{rid}.png"
@@ -172,8 +175,10 @@ def download_icon(resource_id, resource_type):
                     with open(local_path, "wb") as f:
                         f.write(data)
                     return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
-        except Exception:
-            pass
+                else:
+                    last_err = f"CDN武器: 非PNG响应({resp.status})"
+        except Exception as e:
+            last_err = f"CDN武器: {e}"
         # CDN 失败或返回非图片 → encore.moe 兜底
         encore_url = _encore_icon_map.get(rid)
         if encore_url:
@@ -185,10 +190,12 @@ def download_icon(resource_id, resource_type):
                         with open(local_path, "wb") as f:
                             f.write(resp.read())
                         return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
-            except Exception:
-                pass
+            except Exception as e:
+                last_err = f"encore武器: {e}"
+        else:
+            last_err = last_err or "encore武器: 无映射"
 
-    return (resource_id, "")
+    return (resource_id, "", last_err or "未知原因")
 
 def cache_icons(data):
     """从数据中提取全部图标，并行下载缓存"""
@@ -203,13 +210,32 @@ def cache_icons(data):
 
     print(f"  图标缓存: {len(items)}个, 并行下载中...")
     icon_map = {}
+    errors = {}
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(download_icon, rid, rtype): rid for rid, rtype in items}
         for future in as_completed(futures):
-            rid, local_path = future.result()
+            result = future.result()
+            rid = result[0]
+            local_path = result[1]
             if local_path:
                 icon_map[rid] = local_path
-    print(f"  图标缓存完成: {len(icon_map)}/{len(items)}个")
+            else:
+                err_reason = result[2] if len(result) > 2 else "未知"
+                errors[rid] = err_reason
+    success = len(icon_map)
+    total = len(items)
+    print(f"  图标缓存完成: {success}/{total}个")
+    if success == 0 and total > 0:
+        print(f"  ⚠ 警告: 所有图标下载失败！可能网络不可达或CDN被屏蔽")
+        # 打印最多3个典型错误
+        for i, (rid, err) in enumerate(list(errors.items())[:3]):
+            print(f"    失败示例 [{rid}]: {err}")
+    elif errors:
+        print(f"  {len(errors)}个图标下载失败:")
+        for rid, err in list(errors.items())[:3]:
+            print(f"    [{rid}]: {err}")
+        if len(errors) > 3:
+            print(f"    ... 共{len(errors)}个失败")
     return icon_map
 
 # ============================================================
