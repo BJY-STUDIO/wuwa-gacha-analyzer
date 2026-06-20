@@ -943,8 +943,8 @@ function handleFetch() {
 // ===== Carousel — Fluent UI 2 Top Navigation =====
 (function initCarousel() {
   const CAROUSEL_INTERVAL = 4000;
-  const ARROW_LEFT = '<svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="M12.65 3.15a.5.5 0 0 1 .7.7L7.41 9l5.94 5.15a.5.5 0 0 1-.7.7L7.05 9.35a.5.5 0 0 1 0-.7l5.6-5.5Z"/></svg>';
-  const ARROW_RIGHT = '<svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="M7.35 3.15c.2-.2.5-.2.7 0l5.65 5.65a.5.5 0 0 1 0 .7L8.05 15.15a.5.5 0 0 1-.7-.7L12.59 9 7.35 3.85a.5.5 0 0 1 0-.7Z"/></svg>';
+  const ARROW_LEFT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M10.354 2.646a.5.5 0 0 1 0 .708L5.707 8l4.647 4.646a.5.5 0 0 1-.708.708l-5-5a.5.5 0 0 1 0-.708l5-5a.5.5 0 0 1 .708 0Z"/></svg>';
+  const ARROW_RIGHT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M5.646 2.646a.5.5 0 0 0 0 .708L10.293 8l-4.647 4.646a.5.5 0 0 0 .708.708l5-5a.5.5 0 0 0 0-.708l-5-5a.5.5 0 0 0-.708 0Z"/></svg>';
   const NAV_ARROW = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2.5 7.5C2.22386 7.5 2 7.72386 2 8C2 8.27614 2.22386 8.5 2.5 8.5L12.197 8.5L8.16552 12.1284C7.96026 12.3131 7.94362 12.6292 8.12835 12.8345C8.31308 13.0397 8.62923 13.0564 8.83448 12.8717L13.8345 8.37165C13.9398 8.27683 14 8.14175 14 8C14 7.85826 13.9398 7.72318 13.8345 7.62836L8.83448 3.12836C8.62923 2.94363 8.31308 2.96027 8.12835 3.16552C7.94362 3.37078 7.96026 3.68692 8.16552 3.87165L12.197 7.5L2.5 7.5Z"/></svg>';
   let currentSlide = 0;
   let autoTimer = null;
