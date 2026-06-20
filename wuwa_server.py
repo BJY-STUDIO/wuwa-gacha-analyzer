@@ -689,7 +689,7 @@ body {
 .official-list__tab { padding: 10px 16px; font-size: 13px; font-weight: 600; color: var(--colorNeutralForeground3); cursor: pointer; border: none; background: none; border-bottom: 2px solid transparent; transition: all 0.15s; line-height: 1; }
 .official-list__tab:hover { color: var(--colorNeutralForeground1); }
 .official-list__tab.active { color: var(--colorCompoundBrandForeground1); border-bottom-color: var(--colorCompoundBrandBackground); }
-.official-list__grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; padding: 12px; min-height: 200px; }
+.official-list__grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; padding: 12px; }
 .official-list__card { display: flex; flex-direction: column; border-radius: 6px; border: 1px solid var(--colorNeutralStroke2); background: var(--colorNeutralBackground2); overflow: hidden; cursor: pointer; transition: all 0.15s; text-decoration: none; color: inherit; }
 .official-list__card:hover { border-color: var(--colorNeutralStroke1); background: var(--colorSubtleBackgroundHover); box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
 .official-list__card-img { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: var(--colorNeutralBackground3); }
@@ -697,11 +697,10 @@ body {
 .official-list__card-title { font-size: 13px; font-weight: 600; color: var(--colorNeutralForeground1); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .official-list__card-date { font-size: 11px; color: var(--colorNeutralForeground3); margin-top: auto; }
 .official-list__empty { grid-column: 1 / -1; text-align: center; padding: 40px 0; color: var(--colorNeutralForeground3); font-size: 14px; }
-.official-list__loader { grid-column: 1 / -1; text-align: center; padding: 16px 0; color: var(--colorNeutralForeground3); font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 8px; }
-.official-list__loader.hidden { display: none; }
-.official-list__spin { width: 16px; height: 16px; border: 2px solid var(--colorNeutralStroke2); border-top-color: var(--colorCompoundBrandBackground); border-radius: 50%; animation: official-spin 0.8s linear infinite; }
-@keyframes official-spin { to { transform: rotate(360deg); } }
 .official-list__card-skeleton { aspect-ratio: 16/9; background: linear-gradient(90deg, var(--colorNeutralBackground3) 25%, var(--colorNeutralBackground2) 50%, var(--colorNeutralBackground3) 75%); background-size: 200% 100%; animation: carousel-loading 1.5s infinite; }
+.official-list__body-skeleton { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.official-list__title-skeleton { height: 14px; width: 80%; border-radius: 3px; background: linear-gradient(90deg, var(--colorNeutralBackground3) 25%, var(--colorNeutralBackground2) 50%, var(--colorNeutralBackground3) 75%); background-size: 200% 100%; animation: carousel-loading 1.5s infinite; }
+.official-list__date-skeleton { height: 10px; width: 40%; border-radius: 3px; background: linear-gradient(90deg, var(--colorNeutralBackground3) 25%, var(--colorNeutralBackground2) 50%, var(--colorNeutralBackground3) 75%); background-size: 200% 100%; animation: carousel-loading 1.5s infinite; margin-top: auto; }
 @media (max-width: 768px) { .official-list__grid { grid-template-columns: 1fr; } }
 
 /* Footer */
@@ -800,7 +799,6 @@ body {
       <button class="official-list__tab" data-type="3" onclick="switchOfficialTab(this)">公告</button>
     </div>
     <div class="official-list__grid" id="official-grid"></div>
-    <div class="official-list__loader hidden" id="official-loader"><div class="official-list__spin"></div><span>加载中...</span></div>
   </div>
 
 </div>
@@ -1048,7 +1046,24 @@ function switchOfficialTab(btn) {
   officialState.items = [];
   const grid = document.getElementById('official-grid');
   grid.innerHTML = '';
+  showSkeletonCards(grid, 8);
   loadOfficialList();
+}
+
+function showSkeletonCards(grid, count) {
+  for (let i = 0; i < count; i++) {
+    const sk = document.createElement('div');
+    sk.className = 'official-list__card';
+    sk.style.cursor = 'default';
+    sk.style.pointerEvents = 'none';
+    sk.innerHTML =
+      '<div class="official-list__card-skeleton"></div>' +
+      '<div class="official-list__body-skeleton">' +
+        '<div class="official-list__title-skeleton"></div>' +
+        '<div class="official-list__date-skeleton"></div>' +
+      '</div>';
+    grid.appendChild(sk);
+  }
 }
 
 function renderOfficialCard(item) {
@@ -1089,17 +1104,24 @@ function loadOfficialImg(card) {
 function loadOfficialList() {
   if (officialState.loading || !officialState.hasMore) return;
   officialState.loading = true;
-  const loader = document.getElementById('official-loader');
-  loader.classList.remove('hidden');
 
   const params = new URLSearchParams({ type: officialState.type, page: String(officialState.page), size: '8' });
   fetch('/api/official?' + params.toString())
     .then(r => r.json())
     .then(data => {
       officialState.loading = false;
-      loader.classList.add('hidden');
-      if (!data.ok) return;
+      if (!data.ok) {
+        // Remove any remaining skeletons on error
+        removeSkeletons();
+        return;
+      }
       const grid = document.getElementById('official-grid');
+      // First page: clear skeletons; subsequent pages: remove trailing skeletons
+      if (officialState.page === 1) {
+        grid.innerHTML = '';
+      } else {
+        removeSkeletons();
+      }
       data.list.forEach(item => {
         const card = renderOfficialCard(item);
         grid.appendChild(card);
@@ -1110,21 +1132,32 @@ function loadOfficialList() {
       if (officialState.items.length === 0) {
         grid.innerHTML = '<div class="official-list__empty">暂无内容</div>';
         officialState.hasMore = false;
+      } else if (data.hasMore) {
+        // Append skeleton cards as load-more placeholder
+        showSkeletonCards(grid, 4);
       }
     })
     .catch(() => {
       officialState.loading = false;
-      loader.classList.add('hidden');
+      removeSkeletons();
     });
 }
 
-// Scroll-based infinite load
+function removeSkeletons() {
+  const grid = document.getElementById('official-grid');
+  grid.querySelectorAll('.official-list__card[style]').forEach(el => el.remove());
+}
+
+// Scroll-based infinite load — triggered when skeleton placeholders are near viewport
 function checkOfficialScroll() {
   if (officialState.loading || !officialState.hasMore) return;
-  const container = document.getElementById('official-list');
-  if (!container) return;
-  const rect = container.getBoundingClientRect();
-  if (rect.bottom < window.innerHeight + 200) {
+  const grid = document.getElementById('official-grid');
+  if (!grid) return;
+  // Check if any skeleton card (placeholder) is visible
+  const skeleton = grid.querySelector('.official-list__card[style]');
+  if (!skeleton) return;
+  const rect = skeleton.getBoundingClientRect();
+  if (rect.top < window.innerHeight + 200) {
     officialState.page++;
     loadOfficialList();
   }
@@ -1132,8 +1165,12 @@ function checkOfficialScroll() {
 window.addEventListener('scroll', checkOfficialScroll, { passive: true });
 window.addEventListener('touchmove', checkOfficialScroll, { passive: true });
 
-// Initial load
-setTimeout(() => { loadOfficialList(); }, 100);
+// Initial load — show skeletons first
+setTimeout(() => {
+  const grid = document.getElementById('official-grid');
+  if (grid) showSkeletonCards(grid, 8);
+  loadOfficialList();
+}, 100);
 </script>
 <footer class="site-footer">
   <a href="https://github.com/BJY-STUDIO/wuwa-gacha-analyzer" target="_blank" rel="noopener noreferrer"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg> BJY-STUDIO</a>
