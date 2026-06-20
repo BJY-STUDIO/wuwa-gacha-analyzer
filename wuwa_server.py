@@ -608,16 +608,16 @@ body {
 /* ===== Carousel — Fluent UI 2 Appearance (inverted) ===== */
 .carousel { border-radius: 8px; overflow: hidden; position: relative; margin-top: 20px; }
 
-/* Top nav bar — overlays on image with semi-transparent dark background */
-.carousel__topnav { position: absolute; top: 0; left: 0; right: 0; z-index: 10; display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: rgba(0,0,0,0.45); backdrop-filter: blur(8px); color: #fff; }
-.carousel__topnav-title { font-size: 14px; font-weight: 600; color: #fff; margin-right: 8px; white-space: nowrap; }
-.carousel__topnav-pager { font-size: 12px; color: rgba(255,255,255,0.7); min-width: 36px; text-align: center; }
+/* Top nav bar — Fluent UI 2 style, above image */
+.carousel__topnav { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--colorNeutralBackground2); border-bottom: 1px solid var(--colorNeutralStroke2); color: var(--colorNeutralForeground2); }
+.carousel__topnav-title { font-size: 13px; font-weight: 600; color: var(--colorNeutralForeground1); margin-right: 8px; white-space: nowrap; }
+.carousel__topnav-pager { font-size: 12px; color: var(--colorNeutralForeground3); min-width: 36px; text-align: center; }
 .carousel__topnav-spacer { flex: 1; }
 .carousel__topnav-dots { display: flex; gap: 6px; align-items: center; }
-.carousel__topnav-dot { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,0.5); border: none; cursor: pointer; padding: 0; transition: all 0.3s; }
-.carousel__topnav-dot.active { background: #fff; width: 20px; border-radius: 3px; }
-.carousel__topnav-btn { width: 28px; height: 28px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.1); color: #fff; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: all 0.15s; padding: 0; }
-.carousel__topnav-btn:hover { background: rgba(255,255,255,0.2); border-color: rgba(255,255,255,0.5); }
+.carousel__topnav-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--colorNeutralForeground3); border: none; cursor: pointer; padding: 0; transition: all 0.3s; }
+.carousel__topnav-dot.active { background: var(--colorCompoundBrandBackground); width: 20px; border-radius: 3px; }
+.carousel__topnav-btn { width: 28px; height: 28px; border-radius: 4px; border: 1px solid var(--colorNeutralStroke2); background: var(--colorSubtleBackground); color: var(--colorNeutralForeground2); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: all 0.15s; padding: 0; }
+.carousel__topnav-btn:hover { background: var(--colorSubtleBackgroundHover); border-color: var(--colorNeutralStroke1); }
 
 /* Slider — CSS transition for smooth animation */
 .carousel__viewport { position: relative; width: 100%; overflow: hidden; }
@@ -634,7 +634,7 @@ body {
 .carousel__overlay-title { font-size: 16px; font-weight: 600; line-height: 1.4; margin-bottom: 6px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .carousel__overlay-footer { display: flex; align-items: center; gap: 14px; }
 .carousel__overlay-date { font-size: 12px; color: rgba(255,255,255,0.65); }
-.carousel__overlay-link { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; font-size: 13px; font-weight: 600; color: #fff; background: rgba(255,255,255,0.12); text-decoration: none; border: 1px solid rgba(255,255,255,0.2); backdrop-filter: blur(4px); transition: background 0.15s; }
+.carousel__overlay-link { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: 4px; font-size: 12px; font-weight: 600; line-height: 1; color: #fff; background: rgba(255,255,255,0.12); text-decoration: none; border: 1px solid rgba(255,255,255,0.2); backdrop-filter: blur(4px); transition: background 0.15s; }
 .carousel__overlay-link:hover { background: rgba(255,255,255,0.22); }
 .carousel__overlay-link svg { flex-shrink: 0; }
 
@@ -648,6 +648,12 @@ body {
 @keyframes carousel-loading { from { background-position: -200% 0; } to { background-position: 200% 0; } }
 .carousel--loading .carousel__viewport { background: linear-gradient(90deg, var(--colorNeutralBackground3) 25%, var(--colorNeutralBackground2) 50%, var(--colorNeutralBackground3) 75%); background-size: 200% 100%; animation: carousel-loading 1.5s infinite; min-height: 180px; display: flex; align-items: center; justify-content: center; }
 .carousel--loading .carousel__loading-text { color: var(--colorNeutralForeground3); font-size: 14px; }
+
+/* Footer */
+.site-footer { padding: 16px 0; text-align: center; font-size: 12px; color: var(--colorNeutralForeground3); display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; }
+.site-footer a { color: var(--colorNeutralForeground2); text-decoration: none; display: inline-flex; align-items: center; gap: 4px; transition: color 0.15s; }
+.site-footer a:hover { color: var(--colorCompoundBrandForeground1); text-decoration: underline; }
+.site-footer .sep { color: var(--colorNeutralForeground3); opacity: 0.4; }
 </style>
 </head>
 <body>
@@ -836,7 +842,7 @@ function handleFetch() {
   const CAROUSEL_INTERVAL = 4000;
   const ARROW_LEFT = '<svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="M12.65 3.15a.5.5 0 0 1 .7.7L7.41 9l5.94 5.15a.5.5 0 0 1-.7.7L7.05 9.35a.5.5 0 0 1 0-.7l5.6-5.5Z"/></svg>';
   const ARROW_RIGHT = '<svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="M7.35 3.15c.2-.2.5-.2.7 0l5.65 5.65a.5.5 0 0 1 0 .7L8.05 15.15a.5.5 0 0 1-.7-.7L12.59 9 7.35 3.85a.5.5 0 0 1 0-.7Z"/></svg>';
-  const NAV_ARROW = '<svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="M8.15 4.15a.5.5 0 0 0 0 .7L12.59 9l-4.44 4.15a.5.5 0 0 0 .7.7l5-4.5a.5.5 0 0 0 0-.7l-5-4.5a.5.5 0 0 0-.7 0Z"/></svg>';
+  const NAV_ARROW = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2.5 7.5C2.22386 7.5 2 7.72386 2 8C2 8.27614 2.22386 8.5 2.5 8.5L12.197 8.5L8.16552 12.1284C7.96026 12.3131 7.94362 12.6292 8.12835 12.8345C8.31308 13.0397 8.62923 13.0564 8.83448 12.8717L13.8345 8.37165C13.9398 8.27683 14 8.14175 14 8C14 7.85826 13.9398 7.72318 13.8345 7.62836L8.83448 3.12836C8.62923 2.94363 8.31308 2.96027 8.12835 3.16552C7.94362 3.37078 7.96026 3.68692 8.16552 3.87165L12.197 7.5L2.5 7.5Z"/></svg>';
   let currentSlide = 0;
   let autoTimer = null;
 
@@ -875,7 +881,7 @@ function handleFetch() {
               <div class="carousel__overlay-title">${item.title}</div>
               <div class="carousel__overlay-footer">
                 <span class="carousel__overlay-date">${item.date}</span>
-                <a class="carousel__overlay-link" href="${item.url}" target="_blank" rel="noopener noreferrer">${NAV_ARROW} 阅读详情</a>
+                <a class="carousel__overlay-link" href="${item.url}" target="_blank" rel="noopener noreferrer">阅读详情 ${NAV_ARROW}</a>
               </div>
             </div>
           </div>`;
@@ -924,6 +930,11 @@ function handleFetch() {
     });
 })();
 </script>
+<footer class="site-footer">
+  <a href="https://github.com/BJY-STUDIO/wuwa-gacha-analyzer" target="_blank" rel="noopener noreferrer"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg> BJY-STUDIO</a>
+  <span class="sep">|</span>
+  <a href="https://bjy-studio.github.io/" target="_blank" rel="noopener noreferrer">Blog</a>
+</footer>
 </body>
 </html>"""
 # 分析页模板 — CSS/JS 逻辑与原 gacha_report.py 一致，但数据通过 fetch 获取
@@ -1560,6 +1571,12 @@ svg.fluent-icon { vertical-align: middle; flex-shrink: 0; }
 [data-theme="dark"] .tl-tag.lost { background: rgba(212,140,0,0.2); color: #f0b030; }
 .tl-tag.guaranteed { background: rgba(16,124,16,0.12); color: #107c10; }
 [data-theme="dark"] .tl-tag.guaranteed { background: rgba(16,124,16,0.2); color: #6ccb5f; }
+
+/* Footer */
+.site-footer { padding: 16px 0; text-align: center; font-size: 12px; color: var(--colorNeutralForeground3); display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; }
+.site-footer a { color: var(--colorNeutralForeground2); text-decoration: none; display: inline-flex; align-items: center; gap: 4px; transition: color 0.15s; }
+.site-footer a:hover { color: var(--colorCompoundBrandForeground1); text-decoration: underline; }
+.site-footer .sep { color: var(--colorNeutralForeground3); opacity: 0.4; }
 </style>
 </head>
 <body>
@@ -2355,6 +2372,11 @@ loadAndRender();
 initTooltip();
 </script>
 <div class="toast-container" id="toast-container"></div>
+<footer class="site-footer">
+  <a href="https://github.com/BJY-STUDIO/wuwa-gacha-analyzer" target="_blank" rel="noopener noreferrer"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg> BJY-STUDIO</a>
+  <span class="sep">|</span>
+  <a href="https://bjy-studio.github.io/" target="_blank" rel="noopener noreferrer">Blog</a>
+</footer>
 </body>
 </html>"""
 
