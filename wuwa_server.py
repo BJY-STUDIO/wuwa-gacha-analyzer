@@ -1077,7 +1077,7 @@ function loadOfficialImg(card) {
     skeleton.removeAttribute('data-img');
     skeleton.style.backgroundImage = 'url(' + src + ')';
     skeleton.style.backgroundSize = 'cover';
-    skeleton.style.backgroundPosition = 'center';
+    skeleton.style.backgroundPosition = 'center top';
   };
   img.onerror = function() {
     skeleton.classList.remove('official-list__card-skeleton');
