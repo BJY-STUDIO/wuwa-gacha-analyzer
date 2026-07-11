@@ -290,9 +290,18 @@ def _stable_sort_desc(records):
     indexed.sort(key=lambda x: (-_time_to_int(x[1].get("time", "")), x[0]))
     return [r for _, r in indexed]
 
+import re
+
+def _sanitize_time(t):
+    """清除时间字符串中的非法字符（如 '2024s-05-24' → '2024-05-24'）"""
+    if not t:
+        return t
+    return re.sub(r'[^\d\s:-]', '', t)
+
 def _time_to_int(t):
     """将时间字符串转为可比较的整数 (YYYYMMDDHHmmss)"""
     try:
+        t = _sanitize_time(t)
         return int(t.replace("-", "").replace(":", "").replace(" ", ""))
     except (ValueError, AttributeError):
         return 0
@@ -303,6 +312,14 @@ def _merge_pool(pool_id, old_records, new_records):
         return _stable_sort_desc(old_records)
     if not old_records:
         return _stable_sort_desc(new_records)
+
+    # 对双方数据排序以确保时间倒序（数据可能经过时间清洗）
+    old_records = _stable_sort_desc(old_records)
+    new_records = _stable_sort_desc(new_records)
+
+    # 确保合并对称性：让 new_records 始终是记录更多的一方
+    if len(new_records) < len(old_records):
+        old_records, new_records = new_records, old_records
 
     new_key_set = set(_record_key(r) for r in new_records)
     oldest_new_time = new_records[-1].get("time", "")
@@ -370,6 +387,10 @@ def merge_data(new_data, existing_data):
                 new_records.extend(v)
 
         merged_records = _merge_pool(pool_key, old_records, new_records)
+        # 清洗记录中的时间字段
+        for r in merged_records:
+            if "time" in r and r["time"]:
+                r["time"] = _sanitize_time(r["time"])
         merged[pool_key] = merged_records
 
     return merged
