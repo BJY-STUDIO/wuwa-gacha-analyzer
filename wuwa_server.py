@@ -253,6 +253,7 @@ POOL_TYPE_NAMES = {
     4: "武器常驻唤取", 5: "新手唤取", 6: "新手自选唤取",
     7: "感恩定向唤取", 8: "角色新旅唤取", 9: "武器新旅唤取",
     10: "角色联动唤取", 11: "武器联动唤取",
+    12: "角色忆旅唤取", 13: "武器忆旅唤取",
 }
 
 POOL_NAME_TO_TYPE = {
@@ -262,6 +263,7 @@ POOL_NAME_TO_TYPE = {
     "感恩定向唤取": 7, "角色新旅唤取": 8,
     "武器新旅唤取": 9, "角色联动唤取": 10,
     "武器联动唤取": 11,
+    "角色忆旅唤取": 12, "武器忆旅唤取": 13,
     "角色精准调谐": 1, "武器精准调谐": 2,
     "角色调谐（常驻池）": 3, "武器调谐（常驻池）": 4,
     "新手调谐": 5, "自选调谐": 6, "常驻调谐": 7,
@@ -1424,12 +1426,14 @@ svg.fluent-icon { vertical-align: middle; flex-shrink: 0; }
 /* ── Fluent UI 2 TabList Horizontal ── */
 .pool-tabs {
   display: flex; flex-direction: row; gap: 0;
-  margin: 12px 0 0; padding: 0; height: 44px;
+  margin: 12px 0 0; padding: 0 0 5px; min-height: 44px;
   position: relative; overflow-x: auto; overflow-y: hidden;
   scrollbar-width: thin;
 }
-.pool-tabs::-webkit-scrollbar { height: 2px; }
-.pool-tabs::-webkit-scrollbar-thumb { background: var(--colorNeutralStroke3); border-radius: 1px; }
+.pool-tabs::-webkit-scrollbar { height: 3px; }
+.pool-tabs::-webkit-scrollbar-track { background: var(--colorNeutralStroke3); border-radius: 2px; margin: 0 4px; }
+.pool-tabs::-webkit-scrollbar-thumb { background: var(--colorNeutralForeground4); border-radius: 2px; }
+.pool-tabs::-webkit-scrollbar-thumb:hover { background: var(--colorNeutralForeground3); }
 .pool-tab {
   position: relative; display: inline-flex; align-items: center; justify-content: center;
   padding: 12px 10px; height: 44px; background: transparent; border: none;
@@ -1860,7 +1864,7 @@ svg.fluent-icon { vertical-align: middle; flex-shrink: 0; }
   <hr class="fui-divider inset">
   <div class="footer">
     数据来源：游戏内唤取记录 | 保底规则：5星80抽硬保底（新手池50抽），4星10抽硬保底<br>
-    角色活动池5星保底跨池共享 | 武器活动池5星保底跨池共享 | 联动池保底仅在相同联动主题内共享<br>
+    角色活动池5星保底跨池共享 | 武器活动池5星保底跨池共享 | 联动池保底仅在相同联动主题内共享 | 角色忆旅池5星保底跨池共享<br>
     注意：API仅能获取近6个月数据 | UP/歪判定为基于常驻角色列表估算，仅供参考
   </div>
 </div>
@@ -2025,6 +2029,8 @@ const POOL_CONFIG = {
   "9":  { name: "武器新旅唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "weapon-selected", hasUP4: true, up4Type: "weapon" },
   "10": { name: "角色联动唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "character-collab", hasUP4: true, up4Type: "character-collab", crossPoolPity: "char-collab" },
   "11": { name: "武器联动唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "weapon-guaranteed-collab", hasUP4: true, up4Type: "weapon-collab", crossPoolPity: "weapon-collab" },
+  "12": { name: "角色忆旅唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "character-memory", hasUP4: true, up4Type: "character", crossPoolPity: "char-memory" },
+  "13": { name: "武器忆旅唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "weapon-selected", hasUP4: true, up4Type: "weapon" },
 };
 
 const STANDARD_5STAR_CHARS = new Set(['维里奈','凌阳','卡卡罗','鉴心','安可']);
@@ -2075,6 +2081,8 @@ function normalizeData(raw) {
     if (!/^\\d+$/.test(key)) {
       const m = { '角色活动唤取':'1','武器活动唤取':'2','角色常驻唤取':'3','武器常驻唤取':'4',
         '新手唤取':'5','新手自选唤取':'6','感恩定向唤取':'7',
+        '角色新旅唤取':'8','武器新旅唤取':'9','角色联动唤取':'10','武器联动唤取':'11',
+        '角色忆旅唤取':'12','武器忆旅唤取':'13',
         '角色精准调谐':'1','武器精准调谐':'2','角色调谐（常驻池）':'3','武器调谐（常驻池）':'4',
         '新手调谐':'5','自选调谐':'6','常驻调谐':'7' };
       poolId = m[key] || key;
@@ -2104,7 +2112,7 @@ function analyzePool(records, poolId) {
         if (cfg.up5Type === 'weapon-guaranteed' || cfg.up5Type === 'weapon-guaranteed-collab') { tag = 'up'; }
         else if (cfg.up5Type === 'weapon-selected') { tag = 'selected'; }
         else if (cfg.up5Type === 'character-selected') { tag = 'selected'; }
-        else if (cfg.up5Type === 'character' || cfg.up5Type === 'character-collab') {
+        else if (cfg.up5Type === 'character' || cfg.up5Type === 'character-collab' || cfg.up5Type === 'character-memory') {
           // 身份优先：先判断是否常驻角色，再判断保底状态
           if (STANDARD_5STAR_CHARS.has(r.name)) { tag = 'lost'; gs5 = 'big'; }
           else if (r.resourceType === '武器') { tag = 'lost'; gs5 = 'big'; }
@@ -2170,7 +2178,7 @@ function renderPoolTabs(all) {
   let html='', first=true;
   for (const pid of Object.keys(POOL_CONFIG)) {
     const a=all[pid], cnt=a?a.total:0;
-    if (!cnt && !['1','2','4','5','6','10','11'].includes(pid)) continue;
+    if (!cnt && !['1','2','4','5','6','8','9','10','11','12','13'].includes(pid)) continue;
     html+=`<div class="pool-tab ${first?'active':''}" data-pool="${pid}" onclick="switchPool('${pid}')">${POOL_CONFIG[pid].name}<span class="count">${cnt}</span></div>`;
     first=false;
   }
@@ -2194,6 +2202,7 @@ function renderPoolContent(pid, a) {
     else if (a.up5Type === 'character-selected') guHtml='<div class="pity-status no-up">5星必为自选角色</div>';
     else if (a.up5Type === 'character') guHtml=a.guaranteeState5==='big'?'<div class="pity-status big">大保底 — 下次5星必出UP角色</div>':'<div class="pity-status small">小保底 — 50%概率出UP角色</div>';
     else if (a.up5Type === 'character-collab') guHtml=a.guaranteeState5==='big'?'<div class="pity-status big">联动大保底 — 下次5星必出UP角色</div>':'<div class="pity-status small">联动小保底 — 50%概率出UP角色</div>';
+    else if (a.up5Type === 'character-memory') guHtml=a.guaranteeState5==='big'?'<div class="pity-status big">忆旅大保底 — 下次5星必出UP角色</div>':'<div class="pity-status small">忆旅小保底 — 50%概率出UP角色</div>';
   } else { guHtml='<div class="pity-status no-up">常驻池 — 无UP机制</div>'; }
 
   let gu4Html='';
@@ -2210,6 +2219,7 @@ function renderPoolContent(pid, a) {
     else if (a.crossPoolPity === 'weapon-event') crossPoolNote='<div style="font-size:11px;color:var(--colorNeutralForeground3);margin-top:4px">*5星保底计数在所有「武器活动唤取」池间共享继承</div>';
     else if (a.crossPoolPity === 'char-collab') crossPoolNote='<div style="font-size:11px;color:var(--colorNeutralForeground3);margin-top:4px">*5星保底计数仅在相同联动主题的「角色联动唤取」池间共享</div>';
     else if (a.crossPoolPity === 'weapon-collab') crossPoolNote='<div style="font-size:11px;color:var(--colorNeutralForeground3);margin-top:4px">*5星保底计数仅在相同联动主题的「武器联动唤取」池间共享</div>';
+    else if (a.crossPoolPity === 'char-memory') crossPoolNote='<div style="font-size:11px;color:var(--colorNeutralForeground3);margin-top:4px">*5星保底计数在所有「角色忆旅唤取」池间共享继承</div>';
   }
 
   let distH='', lblH='';
@@ -2721,6 +2731,7 @@ FETCH_POOL_NAMES = {
     "7": "感恩定向唤取", "8": "角色新旅唤取",
     "9": "武器新旅唤取", "10": "角色联动唤取",
     "11": "武器联动唤取",
+    "12": "角色忆旅唤取", "13": "武器忆旅唤取",
 }
 
 @app.route('/api/news')
@@ -2803,6 +2814,7 @@ def api_official():
         return jsonify({'ok': True, 'list': result, 'hasMore': has_more})
     except Exception as e:
         return jsonify({'ok': False, 'list': [], 'hasMore': False, 'error': str(e)})
+@app.route('/api/fetch', methods=['POST'])
 def api_fetch():
     """从游戏API抓取抽卡记录 — SSE 流式返回逐池进度"""
     global current_data, current_icon_map
@@ -2832,10 +2844,10 @@ def api_fetch():
         total = 0
         pool_results = []
 
-        for pool_type in range(1, 12):
+        for pool_type in range(1, 14):
             pool_name = FETCH_POOL_NAMES.get(str(pool_type), str(pool_type))
             # 推送"正在获取"进度
-            yield f"data: {json.dumps({'type': 'progress', 'pool': pool_name, 'index': pool_type, 'total_pools': 11}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'progress', 'pool': pool_name, 'index': pool_type, 'total_pools': 13}, ensure_ascii=False)}\n\n"
 
             count = 0
             try:
@@ -2872,9 +2884,9 @@ def api_fetch():
 
             pool_results.append({"pool": pool_name, "count": count})
             # 推送"获取完成"结果
-            yield f"data: {json.dumps({'type': 'result', 'pool': pool_name, 'count': count, 'index': pool_type, 'total_pools': 11}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'result', 'pool': pool_name, 'count': count, 'index': pool_type, 'total_pools': 13}, ensure_ascii=False)}\n\n"
 
-            if pool_type < 11:
+            if pool_type < 13:
                 time.sleep(0.5)
 
         if total == 0:

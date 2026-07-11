@@ -575,7 +575,7 @@ tr:nth-child(even):hover td {{ background: var(--colorNeutralBackground1Hover); 
   <div id="pool-content"></div>
   <div class="footer">
     数据来源：游戏内唤取记录 | 保底规则：5星80抽硬保底（新手池50抽），4星10抽硬保底<br>
-    角色活动池5星保底跨池共享 | 武器活动池5星保底跨池共享 | 联动池保底仅在相同联动主题内共享<br>
+    角色活动池5星保底跨池共享 | 武器活动池5星保底跨池共享 | 联动池保底仅在相同联动主题内共享 | 角色忆旅池5星保底跨池共享<br>
     注意：API仅能获取近6个月数据 | UP/歪判定为基于常驻角色列表估算，仅供参考
   </div>
 </div>
@@ -650,6 +650,8 @@ const POOL_CONFIG = {{
   "9":  {{ name: "武器新旅唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "weapon-selected", hasUP4: true, up4Type: "weapon" }},
   "10": {{ name: "角色联动唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "character-collab", hasUP4: true, up4Type: "character-collab", crossPoolPity: "char-collab" }},
   "11": {{ name: "武器联动唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "weapon-guaranteed-collab", hasUP4: true, up4Type: "weapon-collab", crossPoolPity: "weapon-collab" }},
+  "12": {{ name: "角色忆旅唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "character-memory", hasUP4: true, up4Type: "character", crossPoolPity: "char-memory" }},
+  "13": {{ name: "武器忆旅唤取", pity5: 80, pity4: 10, hasUP5: true, up5Type: "weapon-selected", hasUP4: true, up4Type: "weapon" }},
 }};
 
 // 官方规则：
@@ -662,6 +664,8 @@ const POOL_CONFIG = {{
 // - 武器新旅唤取：5星必为自选武器；4星50%UP武器，非UP下次必UP武器；保底独立不继承
 // - 角色联动唤取：5星50%UP，歪了下次必UP；4星50%UP角色，非UP下次必UP角色；同主题联动池共享保底
 // - 武器联动唤取：5星必出UP武器；4星50%UP武器，非UP下次必UP武器；同主题联动池共享保底
+// - 角色忆旅唤取：5星50%UP，歪了下次必UP；4星50%UP角色，非UP下次必UP角色；跨池共享保底
+// - 武器忆旅唤取：5星必为自选武器；4星50%UP武器，非UP下次必UP武器；保底独立不继承
 
 const STANDARD_5STAR_CHARS = new Set(['维里奈','凌阳','卡卡罗','吟霖','鉴心','莫宁','珂莱塔']);
 
@@ -703,6 +707,8 @@ function normalizeData(raw) {{
     if (!/^\\d+$/.test(key)) {{
       const m = {{ '角色活动唤取':'1','武器活动唤取':'2','角色常驻唤取':'3','武器常驻唤取':'4',
         '新手唤取':'5','新手自选唤取':'6','感恩定向唤取':'7',
+        '角色新旅唤取':'8','武器新旅唤取':'9','角色联动唤取':'10','武器联动唤取':'11',
+        '角色忆旅唤取':'12','武器忆旅唤取':'13',
         '角色精准调谐':'1','武器精准调谐':'2','角色调谐（常驻池）':'3','武器调谐（常驻池）':'4',
         '新手调谐':'5','自选调谐':'6','常驻调谐':'7' }};
       poolId = m[key] || key;
@@ -740,7 +746,7 @@ function analyzePool(records, poolId) {{
         }} else if (cfg.up5Type === 'character-selected') {{
           // 新手自选唤取：5星必为自选角色
           tag = 'selected';
-        }} else if (cfg.up5Type === 'character' || cfg.up5Type === 'character-collab') {{
+        }} else if (cfg.up5Type === 'character' || cfg.up5Type === 'character-collab' || cfg.up5Type === 'character-memory') {{
           // 角色活动/联动唤取：50%UP，歪了下次必UP
           if (gs5 === 'big') {{
             tag = 'guaranteed';
@@ -847,7 +853,7 @@ function renderPoolTabs(all) {{
   let html='', first=true;
   for (const pid of Object.keys(POOL_CONFIG)) {{
     const a=all[pid], cnt=a?a.total:0;
-    if (!cnt && !['1','2','4','5','6','10','11'].includes(pid)) continue;
+    if (!cnt && !['1','2','4','5','6','8','9','10','11','12','13'].includes(pid)) continue;
     html+=`<div class="pool-tab ${{first?'active':''}}" data-pool="${{pid}}" onclick="switchPool('${{pid}}')">${{POOL_CONFIG[pid].name}}<span class="count">${{cnt}}</span></div>`;
     first=false;
   }}
@@ -871,6 +877,7 @@ function renderPoolContent(pid, a) {{
     else if (a.up5Type === 'character-selected') guHtml='<div class="pity-status no-up">5星必为自选角色</div>';
     else if (a.up5Type === 'character') guHtml=a.guaranteeState5==='big'?'<div class="pity-status big">大保底 — 下次5星必出UP角色</div>':'<div class="pity-status small">小保底 — 50%概率出UP角色</div>';
     else if (a.up5Type === 'character-collab') guHtml=a.guaranteeState5==='big'?'<div class="pity-status big">联动大保底 — 下次5星必出UP角色</div>':'<div class="pity-status small">联动小保底 — 50%概率出UP角色</div>';
+    else if (a.up5Type === 'character-memory') guHtml=a.guaranteeState5==='big'?'<div class="pity-status big">忆旅大保底 — 下次5星必出UP角色</div>':'<div class="pity-status small">忆旅小保底 — 50%概率出UP角色</div>';
   }} else {{
     guHtml='<div class="pity-status no-up">常驻池 — 无UP机制</div>';
   }}
@@ -891,6 +898,7 @@ function renderPoolContent(pid, a) {{
     else if (a.crossPoolPity === 'weapon-event') crossPoolNote='<div style="font-size:11px;color:var(--colorNeutralForeground3);margin-top:4px">*5星保底计数在所有「武器活动唤取」池间共享继承</div>';
     else if (a.crossPoolPity === 'char-collab') crossPoolNote='<div style="font-size:11px;color:var(--colorNeutralForeground3);margin-top:4px">*5星保底计数仅在相同联动主题的「角色联动唤取」池间共享</div>';
     else if (a.crossPoolPity === 'weapon-collab') crossPoolNote='<div style="font-size:11px;color:var(--colorNeutralForeground3);margin-top:4px">*5星保底计数仅在相同联动主题的「武器联动唤取」池间共享</div>';
+    else if (a.crossPoolPity === 'char-memory') crossPoolNote='<div style="font-size:11px;color:var(--colorNeutralForeground3);margin-top:4px">*5星保底计数在所有「角色忆旅唤取」池间共享继承</div>';
   }}
 
   let distH='', lblH='';
