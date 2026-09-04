@@ -126,7 +126,7 @@ wuwa-gacha-analyzer/
 ├── icons/                # 图标缓存（自动生成）
 │   ├── characters/       # 角色头像
 │   ├── weapons/          # 武器图标
-│   └── encore_mapping.json  # 备用图标映射缓存
+│   └── encore_mapping.json  # encore.moe 图标映射缓存
 └── uploads/              # 上传数据（Web 服务自动创建）
 ```
 
@@ -143,7 +143,7 @@ A：合并采用"截断+追加"策略，新数据会覆盖旧数据中重叠的�
 
 ## 致谢
 
-角色武器图标来源：[files.wuthery.com](https://files.wuthery.com)、[encore.moe](https://encore.moe)
+角色武器图标来源：[encore.moe](https://encore.moe)（API 文档：https://api-v2.encore.moe/_docs/scalar）
 
 ## 许可
 

@@ -33,8 +33,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 ICONS_CHAR_DIR = os.path.join(DATA_DIR, "icons", "characters")
 ICONS_WEAPON_DIR = os.path.join(DATA_DIR, "icons", "weapons")
-CDN_CHAR_BASE = "https://files.wuthery.com/p/GameData/IDFiedResources/Common/Image/IconRoleHead256"
-CDN_WEAPON_BASE = "https://files.wuthery.com/p/GameData/IDFiedResources/Common/Image/IconWeapon160"
 ENCORE_CHAR_API = "https://api-v2.encore.moe/api/en/character"
 ENCORE_WEAPON_API = "https://api-v2.encore.moe/api/en/weapon"
 ENCORE_MAPPING_FILE = os.path.join(DATA_DIR, "icons", "encore_mapping.json")
@@ -46,11 +44,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 current_data = None
 current_icon_map = {}
 
-# encore.moe 备用图标映射: {resourceId: "https://..."}
+# encore.moe 图标映射: {resourceId: "https://..."}
 _encore_icon_map = {}
 
 # ============================================================
-# encore.moe 备用图标源
+# encore.moe 图标源（唯一图标来源）
 # ============================================================
 def _fetch_encore_mapping():
     """从 encore.moe API 获取 resourceId→图标URL 映射，缓存到本地JSON"""
@@ -115,10 +113,10 @@ def load_encore_mapping():
     """加载 encore.moe 映射到内存"""
     global _encore_icon_map
     _encore_icon_map = _fetch_encore_mapping()
-    print(f"  encore.moe 备用源就绪: {len(_encore_icon_map)} 个映射")
+    print(f"  encore.moe 图标源就绪: {len(_encore_icon_map)} 个映射")
 
 # ============================================================
-# 图标缓存（并行下载 + CDN→encore.moe 回退）
+# 图标缓存（并行下载，全部来自 encore.moe）
 # ============================================================
 def ensure_icon_dirs():
     os.makedirs(ICONS_CHAR_DIR, exist_ok=True)
@@ -133,76 +131,30 @@ def download_icon(resource_id, resource_type):
     if not resource_id:
         return (resource_id, "")
     rid = str(resource_id)
-    is_char = resource_type == "\u89d2\u8272"
+    is_char = resource_type == "角色"
     local_dir = ICONS_CHAR_DIR if is_char else ICONS_WEAPON_DIR
 
-    # 1) 检查本地已有的缓存（png 或 webp）
-    for ext in (".png", ".webp"):
-        local_path = os.path.join(local_dir, f"{rid}{ext}")
-        if os.path.exists(local_path):
+    # 1) 检查本地缓存（仅复用 encore.moe 下载的 webp；
+    #    旧版 wuthery png 因源站已失效且 ID 映射存在错位，不再复用）
+    local_path = os.path.join(local_dir, f"{rid}.webp")
+    if os.path.exists(local_path):
+        return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
+
+    # 2) 从 encore.moe 下载（resourceId→URL 映射，角色/武器同流程）
+    encore_url = _encore_icon_map.get(rid)
+    if not encore_url:
+        return (resource_id, "", "encore映射缺失")
+    try:
+        resp = _download_url(encore_url)
+        data = resp.content
+        # 源站可能返回 HTML 错误页，需验证是真实图片
+        if resp.status_code == 200 and data and data[:1] != b'<':
+            with open(local_path, "wb") as f:
+                f.write(data)
             return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
-
-    # 2) 角色图标：CDN 主源 → encore.moe 备用
-    #    武器图标：encore.moe 优先（高分辨率 webp）→ CDN IconWeapon80 兜底（低分辨率 png）
-    last_err = None
-    if is_char:
-        # 角色：CDN 优先
-        cdn_url = f"{CDN_CHAR_BASE}/{rid}.png"
-        try:
-            resp = _download_url(cdn_url)
-            if resp.status_code == 200:
-                local_path = os.path.join(local_dir, f"{rid}.png")
-                with open(local_path, "wb") as f:
-                    f.write(resp.content)
-                return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
-        except Exception as e:
-            last_err = f"CDN角色: {e}"
-        # CDN 失败 → encore.moe
-        encore_url = _encore_icon_map.get(rid)
-        if encore_url:
-            try:
-                resp = _download_url(encore_url)
-                if resp.status_code == 200:
-                    local_path = os.path.join(local_dir, f"{rid}.webp")
-                    with open(local_path, "wb") as f:
-                        f.write(resp.content)
-                    return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
-            except Exception as e:
-                last_err = f"encore角色: {e}"
-        else:
-            last_err = last_err or "encore角色: 无映射"
-    else:
-        # 武器：CDN IconWeapon160 优先（高分辨率 png）→ encore.moe 兜底（webp）
-        cdn_url = f"{CDN_WEAPON_BASE}/{rid}.png"
-        try:
-            resp = _download_url(cdn_url)
-            data = resp.content
-            # CDN 可能返回 HTML 404 页面，需验证是真实 PNG
-            if resp.status_code == 200 and data[:4] == b'\x89PNG':
-                local_path = os.path.join(local_dir, f"{rid}.png")
-                with open(local_path, "wb") as f:
-                    f.write(data)
-                return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
-            else:
-                last_err = f"CDN武器: 非PNG响应({resp.status_code})"
-        except Exception as e:
-            last_err = f"CDN武器: {e}"
-        # CDN 失败或返回非图片 → encore.moe 兜底
-        encore_url = _encore_icon_map.get(rid)
-        if encore_url:
-            try:
-                resp = _download_url(encore_url)
-                if resp.status_code == 200:
-                    local_path = os.path.join(local_dir, f"{rid}.webp")
-                    with open(local_path, "wb") as f:
-                        f.write(resp.content)
-                    return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
-            except Exception as e:
-                last_err = f"encore武器: {e}"
-        else:
-            last_err = last_err or "encore武器: 无映射"
-
-    return (resource_id, "", last_err or "未知原因")
+        return (resource_id, "", f"encore响应异常({resp.status_code})")
+    except Exception as e:
+        return (resource_id, "", f"encore下载失败: {e}")
 
 def cache_icons(data):
     """从数据中提取全部图标，并行下载缓存"""
@@ -3065,7 +3017,7 @@ if __name__ == '__main__':
     print(f"  上传目录: {UPLOAD_DIR}")
     print("=" * 50)
 
-    # 启动时预加载 encore.moe 备用图标映射
+    # 启动时预加载 encore.moe 图标映射
     load_encore_mapping()
 
     app.run(host='127.0.0.1', port=args.port, debug=args.debug)

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """生成鸣潮抽卡分析报告HTML（Fluent 2 设计规范，深浅主题+本地图标缓存）"""
-import json, os, sys, urllib.request, urllib.error
+import json, os, sys, time, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 DATA_DIR = r"C:\Users\Administrator\Documents\抽卡分析"
 ICONS_CHAR_DIR = os.path.join(DATA_DIR, "icons", "characters")
 ICONS_WEAPON_DIR = os.path.join(DATA_DIR, "icons", "weapons")
-CDN_CHAR_BASE = "https://files.wuthery.com/p/GameData/IDFiedResources/Common/Image/IconRoleHead256"
-CDN_WEAPON_BASE = "https://files.wuthery.com/p/GameData/IDFiedResources/Common/Image/IconWeapon80"
+ENCORE_CHAR_API = "https://api-v2.encore.moe/api/en/character"
+ENCORE_WEAPON_API = "https://api-v2.encore.moe/api/en/weapon"
+ENCORE_MAPPING_FILE = os.path.join(DATA_DIR, "icons", "encore_mapping.json")
 JSON_FILE = os.path.join(DATA_DIR, "uid_100018154_2026-06-13.json")
 
 if len(sys.argv) > 1:
@@ -37,29 +38,69 @@ def ensure_icon_dirs():
     os.makedirs(ICONS_CHAR_DIR, exist_ok=True)
     os.makedirs(ICONS_WEAPON_DIR, exist_ok=True)
 
+# ============================================================
+# encore.moe 图标源：resourceId→图标URL 映射（7天文件缓存）
+# ============================================================
+def _fetch_encore_mapping():
+    if os.path.exists(ENCORE_MAPPING_FILE):
+        try:
+            mtime = os.path.getmtime(ENCORE_MAPPING_FILE)
+            if (time.time() - mtime) < 7 * 86400:
+                with open(ENCORE_MAPPING_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+    mapping = {}
+    for api, list_key, icon_key in ((ENCORE_CHAR_API, "roleList", "RoleHeadIcon"),
+                                    (ENCORE_WEAPON_API, "weapons", "Icon")):
+        try:
+            req = urllib.request.Request(api, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                for item in json.load(resp).get(list_key, []):
+                    rid, icon = str(item.get("Id", "")), item.get(icon_key, "")
+                    if rid and icon:
+                        mapping[rid] = icon
+        except Exception as e:
+            print(f"  ⚠ encore.moe 映射获取失败({api}): {e}")
+            if os.path.exists(ENCORE_MAPPING_FILE):
+                try:
+                    with open(ENCORE_MAPPING_FILE, "r", encoding="utf-8") as f:
+                        return json.load(f)
+                except Exception:
+                    pass
+    if mapping:
+        os.makedirs(os.path.dirname(ENCORE_MAPPING_FILE), exist_ok=True)
+        with open(ENCORE_MAPPING_FILE, "w", encoding="utf-8") as f:
+            json.dump(mapping, f, ensure_ascii=False)
+    return mapping
+
 def download_icon(resource_id, resource_type):
     if not resource_id:
         return (resource_id, "")
     rid = str(resource_id)
-    if resource_type == "\u89d2\u8272":
-        local_dir, url = ICONS_CHAR_DIR, f"{CDN_CHAR_BASE}/{rid}.png"
-    else:
-        local_dir, url = ICONS_WEAPON_DIR, f"{CDN_WEAPON_BASE}/{rid}.png"
-    local_path = os.path.join(local_dir, f"{rid}.png")
+    local_dir = ICONS_CHAR_DIR if resource_type == "角色" else ICONS_WEAPON_DIR
+    # 仅复用 encore.moe 下载的 webp；旧版 wuthery png 已停用（源站失效且 ID 映射错位）
+    local_path = os.path.join(local_dir, f"{rid}.webp")
     if os.path.exists(local_path):
         return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
+    url = _ENCORE_MAP.get(rid)
+    if not url:
+        return (resource_id, "")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
-            if resp.status == 200:
+            data = resp.read()
+            if resp.status == 200 and data and data[:1] != b'<':
                 with open(local_path, "wb") as f:
-                    f.write(resp.read())
+                    f.write(data)
                 return (resource_id, os.path.relpath(local_path, DATA_DIR).replace("\\", "/"))
     except Exception:
         pass
     return (resource_id, "")
 
 ensure_icon_dirs()
+_ENCORE_MAP = _fetch_encore_mapping()
+print(f"encore.moe 图标映射: {len(_ENCORE_MAP)} 个")
 items_to_cache = set()
 for key, records in raw_data.items():
     if not isinstance(records, list):
